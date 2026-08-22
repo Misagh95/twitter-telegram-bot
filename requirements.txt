@@ -1,0 +1,9 @@
+python-telegram-bot[job-queue]>=20.0
+httpx
+feedparser
+psycopg2-binary
+deep-translator
+python-dotenv
+fastapi
+uvicorn
+jinja2

@@ -1,0 +1,18 @@
+{
+  "name": "CryptoX Monitor",
+  "short_name": "CryptoX",
+  "description": "Twitter/X to Telegram Monitor",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/733/733579.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

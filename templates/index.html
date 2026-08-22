@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>CryptoX Monitor</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="https://cdn-icons-png.flaticon.com/512/733/733579.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 900: '#000000', 800: '#0a0a0a', 700: '#111111', 600: '#1a1a1a' },
+                        accent: { DEFAULT: '#2563eb', light: '#3b82f6', dim: '#1e40af' }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+    <style>
+        * { scrollbar-width: thin; scrollbar-color: #333 #000; }
+        body { background: #000; color: #e5e5e5; font-family: 'Vazirmatn', system-ui, sans-serif; }
+        .glass { background: rgba(255,255,255,0.02); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.04); }
+        .glass:hover { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
+        .tweet-img { border-radius: 16px; border: 1px solid rgba(255,255,255,0.05); }
+        .persian { direction: rtl; text-align: right; }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .pulse-live { animation: pulse-dot 2s ease-in-out infinite; }
+        .flag-icon { width: 20px; height: auto; display: inline-block; vertical-align: middle; filter: drop-shadow(0 0 2px rgba(255,200,0,0.3)); }
+        .glow { box-shadow: 0 0 30px rgba(37,99,235,0.05); }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <!-- Navbar -->
+    <header class="sticky top-0 z-50 glass border-b border-white/5">
+        <div class="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="w-2 h-2 bg-emerald-400 rounded-full pulse-live"></div>
+                <span class="text-[11px] font-semibold tracking-widest uppercase text-gray-500">Live</span>
+            </div>
+            <h1 class="text-base font-extrabold tracking-tighter">
+                <span class="text-white">CRYPTO</span><span class="text-accent">X</span>
+            </h1>
+            <button onclick="location.reload()" class="p-2 -m-2 rounded-full hover:bg-white/5 active:scale-95 transition-all" aria-label="بروزرسانی">
+                <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Feed -->
+    <main class="max-w-lg mx-auto px-3 py-4 space-y-4">
+        {% if not tweets %}
+        <div class="glass rounded-3xl p-10 text-center fade-in">
+            <div class="text-4xl mb-3">📡</div>
+            <p class="text-gray-500 text-sm">هنوز توییتی ثبت نشده</p>
+            <p class="text-gray-600 text-xs mt-1">با دستور /add در تلگرام شروع کنید</p>
+        </div>
+        {% endif %}
+
+        {% for tweet in tweets %}
+        <article class="glass rounded-2xl p-4 glow transition-all duration-200 fade-in" style="animation-delay: {{ loop.index0 * 50 }}ms;">
+            <!-- User Header -->
+            <div class="flex items-center gap-3 mb-3">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm shrink-0">
+                    {{ tweet.username[0]|upper }}
+                </div>
+                <div class="min-w-0 flex-1">
+                    <span class="font-bold text-white text-sm block truncate">@{{ tweet.username }}</span>
+                    <span class="text-[10px] text-gray-600 uppercase tracking-wider">
+                        {% if tweet.created_at %}{{ tweet.created_at.strftime('%H:%M') }}{% endif %}
+                    </span>
+                </div>
+            </div>
+
+            <!-- Tweet Text -->
+            <div class="text-gray-300 text-[13px] leading-relaxed mb-3 persian">
+                {{ tweet.title }}
+            </div>
+
+            <!-- Image -->
+            {% if tweet.img_url %}
+            <img
+                src="{{ tweet.img_url }}"
+                alt="Tweet media"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                class="tweet-img w-full h-auto"
+                onerror="this.style.display='none'"
+            >
+            {% endif %}
+
+            <!-- Translation -->
+            {% if tweet.translation %}
+            <div class="mt-3 p-3 bg-blue-500/[0.04] rounded-xl border border-blue-500/10 persian">
+                <div class="flex items-center gap-1.5 mb-1.5">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/f/fd/State_flag_of_Iran_%281964%E2%80%931980%29.svg" class="flag-icon" alt="Shir-o-Khorshid">
+                    <span class="text-[10px] font-bold text-blue-400 uppercase tracking-widest">ترجمه فارسی</span>
+                </div>
+                <p class="text-[12px] text-gray-200 leading-relaxed">{{ tweet.translation }}</p>
+            </div>
+            {% endif %}
+
+            <!-- Actions -->
+            <div class="flex items-center gap-2 mt-3 pt-3 border-t border-white/5">
+                <a href="{{ tweet.tweet_link }}" target="_blank" rel="noopener"
+                   class="flex-1 text-center text-[11px] font-bold text-blue-400 bg-blue-500/10 py-2 rounded-lg hover:bg-blue-500/20 active:scale-[0.98] transition-all">
+                    مشاهده در X
+                </a>
+                <button onclick="if(navigator.share){navigator.share({url:'{{ tweet.tweet_link }}'})}"
+                        class="text-[11px] font-bold text-gray-500 bg-white/5 py-2 px-4 rounded-lg hover:bg-white/10 active:scale-[0.98] transition-all">
+                    اشتراک
+                </button>
+            </div>
+        </article>
+        {% endfor %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="max-w-lg mx-auto p-6 text-center">
+        <p class="text-[10px] text-gray-700 tracking-widest uppercase">Powered by AI</p>
+    </footer>
+
+    <!-- SW Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+        // Auto-refresh every 5 min
+        setTimeout(() => location.reload(), 300000);
+    </script>
+</body>
+</html>
