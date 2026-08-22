@@ -156,7 +156,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("➕ اضافه کردن"), KeyboardButton("📋 لیست اکانت‌ها")],
         [KeyboardButton("🔍 جستجو"), KeyboardButton("🌐 داشبورد")],
-        [KeyboardButton("🔄 بروزرسانی"), KeyboardButton("ℹ️ راهنما")],
+        [KeyboardButton("📊 وضعیت"), KeyboardButton("ℹ️ راهنما")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -227,6 +227,9 @@ async def handle_text(update, context):
     if text == "🔄 بروزرسانی":
         await update.message.reply_text("🔄 بروزرسانی شد! توییت‌های جدید بررسی میشن.")
         return
+    if text == "📊 وضعیت":
+        await cmd_status(update, context)
+        return
     if text == "ℹ️ راهنما":
         await cmd_start(update, context)
         return
@@ -234,6 +237,31 @@ async def handle_text(update, context):
         await cmd_quick_add(update, context)
     else:
         await cmd_search(update, context)
+
+
+async def cmd_status(update, context):
+    chat_id = str(update.effective_chat.id)
+    users = db.get_subs_for_chat(chat_id)
+    tracked = db.get_all_tracked()
+    tweet_count = db._run("SELECT COUNT(*) FROM tweets_content", fetch="one", default=[0])[0] if db.enabled else 0
+    ai_status = "✅ Gemini" if REQUESTY_API_KEY else "⚠️ Google Translate (رایگان)"
+    db_status = "✅ PostgreSQL" if db.enabled else "❌ غیرفعال"
+
+    lines = [
+        "📊 <b>وضعیت ربات</b>",
+        "",
+        f"🤖 <b>ترجمه:</b> {ai_status}",
+        f"💾 <b>دیتابیس:</b> {db_status}",
+        f"📝 <b>توییت‌های ذخیره شده:</b> {tweet_count}",
+        f"👤 <b>اکانت‌های شما:</b> {len(set(users))}",
+        f"🌐 <b>اکانت‌های کل:</b> {len(tracked)}",
+        f"⏱ <b>بررسی هر:</b> {CHECK_INTERVAL} ثانیه",
+    ]
+
+    if REQUESTY_API_KEY:
+        lines.append(f"🧠 <b>مدل:</b> {REQUESTY_MODEL}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def cmd_add(update, context):
     raw = " ".join(context.args)
@@ -459,6 +487,7 @@ async def lifespan(fastapi_app):
         ("list", "لیست اکانت‌ها"),
         ("test", "تست سریع"),
         ("search", "جستجو در توییت‌ها"),
+        ("status", "وضعیت ربات"),
     ]
 
     async def post_init(application):
@@ -474,6 +503,7 @@ async def lifespan(fastapi_app):
     bot_app_ref.add_handler(CommandHandler("list", cmd_list))
     bot_app_ref.add_handler(CommandHandler("test", cmd_test))
     bot_app_ref.add_handler(CommandHandler("search", cmd_search))
+    bot_app_ref.add_handler(CommandHandler("status", cmd_status))
     bot_app_ref.add_handler(InlineQueryHandler(handle_inline_query))
     bot_app_ref.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
