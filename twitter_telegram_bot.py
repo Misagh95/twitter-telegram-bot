@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 db = Database()
 if not db.enabled:
-    raise SystemExit("DATABASE_URL not found! Set it in .env")
+    logger.warning("Running without database - /add, /list, dashboard disabled")
 app = FastAPI()
 templates = Jinja2Templates(directory=os.path.join(BASE_PATH, "templates"))
 
@@ -240,6 +240,9 @@ async def handle_text(update, context):
 
 
 async def cmd_status(update, context):
+    if not db.enabled:
+        await update.message.reply_text("❌ دیتابیس متصل نیست. لطفاً PostgreSQL رو اضافه کن.")
+        return
     chat_id = str(update.effective_chat.id)
     users = db.get_subs_for_chat(chat_id)
     tracked = db.get_all_tracked()
@@ -264,6 +267,9 @@ async def cmd_status(update, context):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def cmd_add(update, context):
+    if not db.enabled:
+        await update.message.reply_text("❌ دیتابیس متصل نیست. اول PostgreSQL رو اضافه کن.")
+        return
     raw = " ".join(context.args)
     if not raw.strip():
         await update.message.reply_text("UsageId: /add username1 username2", parse_mode=ParseMode.HTML)
@@ -297,6 +303,9 @@ async def cmd_del(update, context):
     await update.message.reply_text("✅ حذف شد.")
 
 async def cmd_list(update, context):
+    if not db.enabled:
+        await update.message.reply_text("❌ دیتابیس متصل نیست.")
+        return
     chat_id = str(update.effective_chat.id)
     users = db.get_subs_for_chat(chat_id)
     if users:
@@ -318,6 +327,9 @@ async def cmd_test(update, context):
 
 
 async def cmd_search(update, context):
+    if not db.enabled:
+        await update.message.reply_text("❌ دیتابیس متصل نیست.")
+        return
     if context.args:
         query = " ".join(context.args)
     else:
@@ -507,8 +519,9 @@ async def lifespan(fastapi_app):
     bot_app_ref.add_handler(InlineQueryHandler(handle_inline_query))
     bot_app_ref.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    bot_app_ref.job_queue.run_repeating(check_updates, interval=CHECK_INTERVAL, first=10)
-    bot_app_ref.job_queue.run_repeating(run_cleanup, interval=86400, first=300)
+    if db.enabled:
+        bot_app_ref.job_queue.run_repeating(check_updates, interval=CHECK_INTERVAL, first=10)
+        bot_app_ref.job_queue.run_repeating(run_cleanup, interval=86400, first=300)
 
     await bot_app_ref.initialize()
     await bot_app_ref.start()
@@ -523,7 +536,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    tweets = db.get_latest_tweets(30)
+    tweets = db.get_latest_tweets(30) if db.enabled else []
     return templates.TemplateResponse(request=request, name="index.html", context={"tweets": tweets})
 
 @app.get("/manifest.json")
