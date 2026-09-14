@@ -19,7 +19,7 @@ load_dotenv()
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
-CONCURRENT_LIMIT = 8
+CONCURRENT_LIMIT = 3
 
 REQUESTY_API_KEY = os.getenv("REQUESTY_API_KEY", "").strip()
 REQUESTY_BASE_URL = os.getenv("REQUESTY_BASE_URL", "https://api.17.wtf/v1").strip().rstrip("/")
@@ -40,14 +40,13 @@ bot_app_ref = None
 translations_cache = {}
 
 RSS_SOURCES = [
-    "https://nitter.privacydev.net/{username}/rss",
     "https://nitter.perennialte.ch/{username}/rss",
-    "https://nitter.poast.org/{username}/rss",
-    "https://nitter.1d4.us/{username}/rss",
-    "https://nitter.woodland.cafe/{username}/rss",
+    "https://nitter.jaydenha.uk/{username}/rss",
+    "https://nitter.netbub.com/{username}/rss",
+    "https://nitter.kareem.one/{username}/rss",
     "https://nitter.cz/{username}/rss",
-    "https://nitter.0xd9.org/{username}/rss",
-    "https://xcancel.com/{username}/rss",
+    "https://nitter.meowing.monster/{username}/rss",
+    "https://nitter.privacydev.net/{username}/rss",
 ]
 RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}
 
@@ -445,6 +444,7 @@ async def deliver(content, chat_ids, bot, force=False):
 async def process_user(username, last_id, bot, sem):
     async with sem:
         entries = await fetch_feed(username)
+        await asyncio.sleep(1)
     if not entries:
         return
 
@@ -529,6 +529,14 @@ async def lifespan(fastapi_app):
     bot_app_ref.add_handler(CommandHandler("status", cmd_status))
     bot_app_ref.add_handler(InlineQueryHandler(handle_inline_query))
     bot_app_ref.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    async def handle_error(update, context):
+        from telegram.error import Conflict
+        if isinstance(context.error, Conflict):
+            return
+        logger.error(f"Unhandled exception: {context.error}")
+
+    bot_app_ref.add_error_handler(handle_error)
 
     if db.enabled:
         bot_app_ref.job_queue.run_repeating(check_updates, interval=CHECK_INTERVAL, first=10)
