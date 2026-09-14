@@ -163,7 +163,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     input_field_placeholder="نام کاربری توییتر رو بنویس...",
 )
 
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8080")
+RAILWAY_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL") or (f"https://{RAILWAY_DOMAIN}" if RAILWAY_DOMAIN else "http://localhost:8080")
 
 
 async def cmd_start(update, context):

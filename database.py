@@ -66,16 +66,16 @@ class Database:
         return default
 
     def _init_schema(self):
-        self._run("CREATE TABLE IF NOT EXISTS tracked_users (username TEXT PRIMARY KEY, last_id TEXT)")
-        self._run("CREATE TABLE IF NOT EXISTS subscriptions (chat_id TEXT, username TEXT, PRIMARY KEY(chat_id, username))")
-        self._run("CREATE TABLE IF NOT EXISTS sent_ids (chat_id TEXT, tweet_id TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY(chat_id, tweet_id))")
+        self._run("CREATE TABLE IF NOT EXISTS tracked_users (username TEXT PRIMARY KEY, last_id TEXT)", fetch=None)
+        self._run("CREATE TABLE IF NOT EXISTS subscriptions (chat_id TEXT, username TEXT, PRIMARY KEY(chat_id, username))", fetch=None)
+        self._run("CREATE TABLE IF NOT EXISTS sent_ids (chat_id TEXT, tweet_id TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY(chat_id, tweet_id))", fetch=None)
         self._run("""CREATE TABLE IF NOT EXISTS tweets_content (
             id SERIAL PRIMARY KEY, username TEXT, title TEXT,
             translation TEXT, img_url TEXT, tweet_link TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-        self._run("CREATE INDEX IF NOT EXISTS idx_subs_username ON subscriptions(username)")
-        self._run("CREATE INDEX IF NOT EXISTS idx_tweets_created ON tweets_content(created_at DESC)")
-        self._run("CREATE INDEX IF NOT EXISTS idx_sent_created ON sent_ids(created_at)")
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""", fetch=None)
+        self._run("CREATE INDEX IF NOT EXISTS idx_subs_username ON subscriptions(username)", fetch=None)
+        self._run("CREATE INDEX IF NOT EXISTS idx_tweets_created ON tweets_content(created_at DESC)", fetch=None)
+        self._run("CREATE INDEX IF NOT EXISTS idx_sent_created ON sent_ids(created_at)", fetch=None)
 
     def get_all_tracked(self):
         return self._run("SELECT username, last_id FROM tracked_users", default=[])
