@@ -104,13 +104,19 @@ async def translate_text(text):
             }
             resp = await http.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {REQUESTY_API_KEY}"}, json=payload)
             if resp.status_code == 200:
-                result = resp.json()["choices"][0]["message"]["content"].strip()
+                data = resp.json()
+                if data.get("choices") and data["choices"][0].get("message", {}).get("content"):
+                    result = data["choices"][0]["message"]["content"].strip()
+            else:
+                logger.warning(f"AI translate status {resp.status_code}, falling back to Google")
         except Exception as e:
-            logger.warning(f"AI translate failed: {e}")
+            logger.warning(f"AI translate failed: {e}, falling back to Google")
     if not result:
         try:
             from deep_translator import GoogleTranslator
             result = await asyncio.to_thread(GoogleTranslator(source="auto", target="fa").translate, text[:1500])
+            if not result:
+                logger.warning("Google translate returned empty")
         except Exception as e:
             logger.warning(f"Google translate failed: {e}")
             result = ""
