@@ -40,12 +40,16 @@ bot_app_ref = None
 translations_cache = {}
 
 RSS_SOURCES = [
-    "https://xcancel.com/{username}/rss",
     "https://nitter.privacydev.net/{username}/rss",
     "https://nitter.perennialte.ch/{username}/rss",
-    "https://nitter.net/{username}/rss",
+    "https://nitter.poast.org/{username}/rss",
+    "https://nitter.1d4.us/{username}/rss",
+    "https://nitter.woodland.cafe/{username}/rss",
+    "https://nitter.cz/{username}/rss",
+    "https://nitter.0xd9.org/{username}/rss",
+    "https://xcancel.com/{username}/rss",
 ]
-RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -130,7 +134,7 @@ async def fetch_feed(username):
     for src in RSS_SOURCES:
         url = src.format(username=username)
         try:
-            resp = await http.get(url, timeout=10, follow_redirects=True)
+            resp = await http.get(url, timeout=15, follow_redirects=True)
             if resp.status_code != 200 or "uni-sonia" in str(resp.url):
                 continue
             feed = await asyncio.to_thread(feedparser.parse, resp.text)
