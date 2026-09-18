@@ -125,12 +125,16 @@ class Database:
 
     def get_tweets_missing_translation(self, limit=15):
         rows = self._run(
-            "SELECT id, title FROM tweets_content WHERE COALESCE(NULLIF(TRIM(translation), ''), '') = '' AND COALESCE(NULLIF(TRIM(title), ''), '') <> '' ORDER BY created_at DESC LIMIT %s",
+            "SELECT id, username, title, tweet_link FROM tweets_content WHERE COALESCE(NULLIF(TRIM(translation), ''), '') = '' AND COALESCE(NULLIF(TRIM(title), ''), '') <> '' ORDER BY created_at DESC LIMIT %s",
             (limit,),
             default=[],
         )
-        columns = ["id", "title"]
+        columns = ["id", "username", "title", "tweet_link"]
         return [dict(zip(columns, r)) for r in rows] if rows else []
+
+    def get_sent_chats_for_tweet(self, tweet_id):
+        rows = self._run("SELECT chat_id FROM sent_ids WHERE tweet_id = %s", (str(tweet_id),), default=[])
+        return [r[0] for r in rows] if rows else []
 
     def update_tweet_translation(self, tweet_id, translation):
         self._run(

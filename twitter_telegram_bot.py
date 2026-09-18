@@ -21,11 +21,33 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "3"))
 
-REQUESTY_API_KEY = os.getenv("REQUESTY_API_KEY", "").strip()
-if REQUESTY_API_KEY.lower() in {"key", "your_key", "your_api_key", "your_gemini_api_key"}:
-    REQUESTY_API_KEY = ""
-REQUESTY_BASE_URL = os.getenv("REQUESTY_BASE_URL", "https://api.17.wtf/v1").strip().rstrip("/")
-REQUESTY_MODEL = os.getenv("REQUESTY_MODEL", "posiden/deepseek-v4-flash").strip()
+PLACEHOLDER_API_KEYS = {"key", "your_key", "your_api_key", "your_gemini_api_key", "your_requesty_or_gemini_key"}
+
+def _clean_api_key(value):
+    value = (value or "").strip()
+    return "" if value.lower() in PLACEHOLDER_API_KEYS else value
+
+GEMINI_API_KEY = _clean_api_key(os.getenv("GEMINI_API_KEY"))
+OPENAI_API_KEY = _clean_api_key(os.getenv("OPENAI_API_KEY"))
+REQUESTY_API_KEY = _clean_api_key(os.getenv("REQUESTY_API_KEY")) or GEMINI_API_KEY or OPENAI_API_KEY
+
+if os.getenv("REQUESTY_BASE_URL"):
+    REQUESTY_BASE_URL = os.getenv("REQUESTY_BASE_URL", "").strip().rstrip("/")
+elif GEMINI_API_KEY and REQUESTY_API_KEY == GEMINI_API_KEY:
+    REQUESTY_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+elif OPENAI_API_KEY and REQUESTY_API_KEY == OPENAI_API_KEY:
+    REQUESTY_BASE_URL = "https://api.openai.com/v1"
+else:
+    REQUESTY_BASE_URL = "https://api.17.wtf/v1"
+
+if os.getenv("REQUESTY_MODEL"):
+    REQUESTY_MODEL = os.getenv("REQUESTY_MODEL", "").strip()
+elif GEMINI_API_KEY and REQUESTY_API_KEY == GEMINI_API_KEY:
+    REQUESTY_MODEL = "gemini-2.0-flash"
+elif OPENAI_API_KEY and REQUESTY_API_KEY == OPENAI_API_KEY:
+    REQUESTY_MODEL = "gpt-4o-mini"
+else:
+    REQUESTY_MODEL = "posiden/deepseek-v4-flash"
 TRANSLATE_FA = os.getenv("TRANSLATE_FA", "true").lower() in ("1", "true", "yes")
 TRANSLATION_TIMEOUT = float(os.getenv("TRANSLATION_TIMEOUT", "20"))
 TRANSLATION_RETRIES = int(os.getenv("TRANSLATION_RETRIES", "2"))
@@ -86,6 +108,14 @@ def extract_id(entry):
         return m3.group(1)
     return None
 
+def extract_tweet_id_from_link(link):
+    value = str(link or "")
+    match = re.search(r"status(?:es)?/(\d+)", value)
+    if match:
+        return match.group(1)
+    match = re.search(r"(\d{17,})", value)
+    return match.group(1) if match else None
+
 def is_newer_tweet_id(tweet_id, last_id):
     if not last_id:
         return True
@@ -115,6 +145,81 @@ def extract_tweet_text(entry):
             return text
     return ""
 
+def _username_from_text(value):
+    value = html.unescape(str(value or "")).strip()
+    if not value:
+        return None
+    match = re.search(r"@([A-Za-z0-9_]{1,15})", value)
+    if match:
+        return clean_username(match.group(1))
+    # Feedparser sometimes gives only the handle or profile URL as the author, without @.
+    # Do not guess from display names like "Elon Musk"; that would look like @elon.
+    if re.search(r"\s", value):
+        return None
+    candidate = clean_username(value)
+    return candidate if is_valid_twitter(candidate) else None
+
+def extract_author_username(entry):
+    candidates = [entry.get("author"), entry.get("dc_creator"), entry.get("creator")]
+    author_detail = entry.get("author_detail") or {}
+    if isinstance(author_detail, dict):
+        candidates.extend([author_detail.get("name"), author_detail.get("href"), author_detail.get("email")])
+    for author in entry.get("authors", []) or []:
+        if isinstance(author, dict):
+            candidates.extend([author.get("name"), author.get("href"), author.get("email")])
+        else:
+            candidates.append(author)
+    for value in candidates:
+        username = _username_from_text(value)
+        if username:
+            return username
+    return None
+
+def extract_link_username(entry):
+    for key in ("link", "id", "guid"):
+        value = str(entry.get(key, "") or "")
+        match = re.search(r"https?://[^/]+/([^/?#]+)/status(?:es)?/\d+", value, flags=re.I)
+        if not match:
+            continue
+        username = clean_username(match.group(1))
+        if username and username not in {"i", "status", "statuses"} and is_valid_twitter(username):
+            return username
+    return None
+
+def is_retweet(entry, username=None):
+    """Detect RSS entries that are retweets/reposts rather than tweets by `username`."""
+    raw_text = "\n".join(str(entry.get(k, "") or "") for k in ("title", "summary", "description"))
+    clean_text = clean_tweet_text(raw_text).lower()
+    raw_lower = raw_text.lower()
+
+    retweet_patterns = [
+        r"^\s*rt\s+@",
+        r"^\s*retweet(?:ed)?\b",
+        r"^\s*@?[A-Za-z0-9_]{1,15}\s+retweeted\b",
+        r"\bretweeted by\b",
+        r"\breposted by\b",
+    ]
+    if any(re.search(pattern, clean_text, flags=re.I) for pattern in retweet_patterns):
+        return True
+    if "retweet-header" in raw_lower or ("retweet" in raw_lower and "retweeted by" in raw_lower):
+        return True
+
+    for tag in entry.get("tags", []) or []:
+        term = tag.get("term") if isinstance(tag, dict) else str(tag)
+        if term and term.lower() in {"rt", "retweet", "repost"}:
+            return True
+
+    expected = clean_username(username) if username else ""
+    if expected:
+        link_username = extract_link_username(entry)
+        if link_username and link_username != expected:
+            return True
+        author_username = extract_author_username(entry)
+        if author_username and author_username != expected:
+            return True
+
+    return False
+
 def extract_image_url(entry):
     desc = entry.get("description", "") or entry.get("summary", "")
     img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', desc, re.I)
@@ -132,6 +237,19 @@ def _trim_translation(result):
     result = clean_tweet_text(result)
     result = re.sub(r"^(ترجمه(?:\s*فارسی)?|translation)\s*[:：-]\s*", "", result, flags=re.I)
     return result.strip(' "“”')
+
+def _message_content_to_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content or "")
 
 def _has_text_to_translate(text):
     # Avoid wasting API quota on empty/media-only tweets, links, emoji-only posts, etc.
@@ -177,7 +295,7 @@ async def _translate_with_requesty(text):
         return ""
     data = resp.json()
     result = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    return _trim_translation(result)
+    return _trim_translation(_message_content_to_text(result))
 
 async def _translate_with_google_endpoint(text):
     # Fast unofficial endpoint used only as a fallback when the AI provider is absent/down.
@@ -304,7 +422,17 @@ async def fetch_feed(username):
             if resp.status_code != 200 or "uni-sonia" in str(resp.url):
                 continue
             feed = await asyncio.to_thread(feedparser.parse, resp.text)
-            valid = [e for e in feed.entries if extract_id(e)]
+            valid = []
+            skipped_retweets = 0
+            for entry in feed.entries:
+                if not extract_id(entry):
+                    continue
+                if is_retweet(entry, username):
+                    skipped_retweets += 1
+                    continue
+                valid.append(entry)
+            if skipped_retweets:
+                logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, username)
             if valid:
                 return valid
         except Exception:
@@ -559,13 +687,22 @@ async def handle_inline_query(update, context):
 
 async def build_content(username, entry):
     tid = extract_id(entry)
-    if not tid:
+    if not tid or is_retweet(entry, username):
         return None
     title = extract_tweet_text(entry)
     translation = await translate_text(title)
+    translation_pending = bool(TRANSLATE_FA and title and _has_text_to_translate(title) and not translation)
     img_url = extract_image_url(entry)
     link = f"https://x.com/i/status/{tid}"
-    return {"tid": tid, "username": username, "title": title, "translation": translation, "img_url": img_url, "link": link}
+    return {
+        "tid": tid,
+        "username": username,
+        "title": title,
+        "translation": translation,
+        "translation_pending": translation_pending,
+        "img_url": img_url,
+        "link": link,
+    }
 
 
 def build_message(c):
@@ -574,6 +711,8 @@ def build_message(c):
     msg = f"{header}\n{body}"
     if c["translation"]:
         msg += f"\n{'━'*10}\n🦁 <b>ترجمه فارسی:</b>\n<blockquote expandable><i>{html.escape(c['translation'][:1900])}</i></blockquote>"
+    elif c.get("translation_pending"):
+        msg += f"\n{'━'*10}\n🦁 <b>ترجمه فارسی:</b>\n<i>ترجمه فعلاً ناموفق بود؛ ربات دوباره تلاش می‌کند و بعداً ارسال می‌کند.</i>"
     return msg
 
 
@@ -665,6 +804,26 @@ async def check_updates(context):
             logger.error(f"Error processing @{u}: {r}")
 
 
+async def notify_backfilled_translation(row, translation, bot):
+    tweet_id = extract_tweet_id_from_link(row.get("tweet_link"))
+    if not tweet_id:
+        return
+    chat_ids = db.get_sent_chats_for_tweet(tweet_id)
+    if not chat_ids:
+        return
+    username = html.escape(str(row.get("username") or "").upper())
+    msg = (
+        f"🦁 <b>ترجمه فارسی | @{username}</b>\n"
+        f"<blockquote expandable><i>{html.escape(translation[:1900])}</i></blockquote>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View on X", url=row["tweet_link"])]]) if row.get("tweet_link") else None
+    for cid in chat_ids:
+        try:
+            await bot.send_message(chat_id=cid, text=msg, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error("Backfill translation notify failed to %s for %s: %s", cid, tweet_id, e)
+
+
 async def run_translation_backfill(context):
     if not db.enabled or not TRANSLATE_FA:
         return
@@ -672,10 +831,13 @@ async def run_translation_backfill(context):
     if not rows:
         return
     logger.info("Backfilling translations for %s saved tweets", len(rows))
+    bot = context.application.bot if context and context.application else None
     for row in rows:
         translation = await translate_text(row["title"])
         if translation:
             db.update_tweet_translation(row["id"], translation)
+            if bot:
+                await notify_backfilled_translation(row, translation, bot)
         await asyncio.sleep(0.4)
 
 
