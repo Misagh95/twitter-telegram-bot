@@ -180,7 +180,8 @@ twitter-telegram-bot/
 | `TRANSLATE_FA` | `true` | Enable Persian translation |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | empty | AI provider key for higher quality translation |
 | `DASHBOARD_URL` | `http://localhost:8080` | Dashboard URL |
-| `CONCURRENT_LIMIT` | `3` | Parallel feed fetch limit |
+| `CONCURRENT_LIMIT` | `3` | Number of accounts checked concurrently |
+| `RSS_FETCH_CONCURRENCY` | `12` | Global cap on concurrent RSS HTTP requests (helps prevent connection-pool timeouts) |
 | `TRANSLATION_TIMEOUT` | `20` | Timeout per translation attempt (seconds) |
 | `TRANSLATION_DELIVERY_TIMEOUT` | `15` | Maximum wait for translation before sending the original post |
 | `TRANSLATION_RETRIES` | `2` | Retries for the primary AI/Google translation attempts |

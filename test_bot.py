@@ -16,6 +16,7 @@ from twitter_telegram_bot import (
     extract_image_url,
     fetch_feed,
     _fetch_x_api_feed,
+    _try_feed_instance,
     _x_api_entries_from_payload,
     is_retweet,
     run_translation_backfill,
@@ -282,6 +283,29 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
 
     def test_public_rsshub_is_in_rss_fallback_sources(self):
         self.assertTrue(any(source.endswith("/twitter/user/{username}") for source in RSS_SOURCES))
+
+    async def test_rss_requests_obey_global_concurrency_limit(self):
+        active = 0
+        peak = 0
+
+        async def slow_get(url, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return MagicMock(status_code=503, url=url)
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=slow_get)
+        with patch("twitter_telegram_bot.http", client), \
+             patch("twitter_telegram_bot.rss_fetch_sem", asyncio.Semaphore(1)):
+            await asyncio.gather(*[
+                _try_feed_instance(f"https://mirror-{i}.example/rss", "user")
+                for i in range(4)
+            ])
+
+        self.assertEqual(peak, 1)
 
     async def test_fetch_feed_drops_reposts_and_keeps_originals(self):
         """A feed with a repost and an own tweet returns only the own tweet."""

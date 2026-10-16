@@ -117,7 +117,8 @@ python twitter_telegram_bot.py
 | `RSSHUB_BASE_URL` | `https://rsshub.app` | آدرس RSSHub که در حالت بدون X API همراه دیگر منابع RSS امتحان می‌شود |
 | `CHECK_INTERVAL` | `300` | فاصله بررسی (ثانیه) |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
-| `CONCURRENT_LIMIT` | `3` | تعداد درخواست همزمان برای دریافت فید |
+| `CONCURRENT_LIMIT` | `3` | تعداد حساب‌هایی که هم‌زمان بررسی می‌شوند |
+| `RSS_FETCH_CONCURRENCY` | `12` | سقف کلی درخواست‌های هم‌زمان RSS برای جلوگیری از PoolTimeout |
 | `TRANSLATION_TIMEOUT` | `20` | تایم‌اوت هر تلاش ترجمه (ثانیه) |
 | `TRANSLATION_DELIVERY_TIMEOUT` | `15` | حداکثر انتظار برای ترجمه؛ بعدش متن اصلی ارسال می‌شود |
 | `TRANSLATION_RETRIES` | `2` | تعداد تلاش دوباره برای تلاش‌های اصلی AI/Google |

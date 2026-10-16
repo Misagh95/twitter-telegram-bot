@@ -24,6 +24,9 @@ X_API_BASE_URL = (os.getenv("X_API_BASE_URL") or "https://api.x.com/2").strip().
 X_USER_ID_CACHE_TTL = max(60, int(os.getenv("X_USER_ID_CACHE_TTL", "86400")))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "3"))
+# Each tracked account fans out to several RSS mirrors; cap requests globally so
+# concurrent accounts cannot exhaust httpx's connection pool and raise PoolTimeout.
+RSS_FETCH_CONCURRENCY = max(1, int(os.getenv("RSS_FETCH_CONCURRENCY", "12")))
 
 PLACEHOLDER_API_KEYS = {"key", "your_key", "your_api_key", "your_gemini_api_key", "your_requesty_or_gemini_key"}
 
@@ -118,6 +121,7 @@ bot_app_ref = None
 translations_cache = {}
 x_user_id_cache = {}
 translation_sem = asyncio.Semaphore(max(1, TRANSLATION_CONCURRENT_LIMIT))
+rss_fetch_sem = asyncio.Semaphore(RSS_FETCH_CONCURRENCY)
 
 RSSHUB_BASE_URL = (os.getenv("RSSHUB_BASE_URL") or "https://rsshub.app").strip().rstrip("/")
 RSS_SOURCES = [
@@ -629,9 +633,10 @@ async def translate_text(text):
 
 
 async def _try_feed_instance(url, target_username):
-    """Fetch and parse one Nitter instance. Returns list of valid entries or None."""
+    """Fetch and parse one RSS source. Returns valid entries or None."""
     try:
-        resp = await http.get(url, timeout=12, follow_redirects=True)
+        async with rss_fetch_sem:
+            resp = await http.get(url, timeout=12, follow_redirects=True)
         if resp.status_code != 200:
             logger.debug("Feed %s returned HTTP %s", resp.url, resp.status_code)
             return None
