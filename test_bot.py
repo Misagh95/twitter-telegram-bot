@@ -19,6 +19,7 @@ from twitter_telegram_bot import (
     _try_feed_instance,
     _x_api_entries_from_payload,
     is_retweet,
+    process_user,
     run_translation_backfill,
     translate_text,
     translations_cache,
@@ -307,6 +308,96 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(peak, 1)
 
+    async def test_fetch_feed_merges_unique_posts_from_all_mirrors(self):
+        def item(tweet_id, title):
+            return (
+                f"<item><title>{title}</title>"
+                f"<link>https://x.com/user/status/{tweet_id}</link>"
+                f"<description>{title}</description></item>"
+            )
+
+        first_feed = self._rss(
+            item("2111000000000000002", "newest")
+            + item("2111000000000000001", "shared")
+        )
+        second_feed = self._rss(
+            item("2111000000000000001", "shared duplicate")
+            + item("2111000000000000000", "older")
+        )
+        responses = {
+            "https://mirror-a.example/user/rss": MagicMock(
+                status_code=200, text=first_feed, url="https://mirror-a.example/user/rss"
+            ),
+            "https://mirror-b.example/user/rss": MagicMock(
+                status_code=200, text=second_feed, url="https://mirror-b.example/user/rss"
+            ),
+        }
+
+        async def get(url, **_kwargs):
+            return responses[url]
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://mirror-a.example/{username}/rss",
+            "https://mirror-b.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual(
+            [extract_id(entry) for entry in entries],
+            ["2111000000000000002", "2111000000000000001", "2111000000000000000"],
+        )
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(client.get.await_count, 2)
+
+    async def test_process_user_batches_oldest_unseen_posts_without_skipping(self):
+        entries = [
+            {
+                "id": str(tweet_id),
+                "link": f"https://x.com/user/status/{tweet_id}",
+                "title": f"post {tweet_id}",
+            }
+            for tweet_id in range(1015, 1000, -1)
+        ]
+        mock_db = MagicMock()
+        mock_db.get_subs_for_user.return_value = ["chat"]
+
+        async def build(_username, entry):
+            return {"tid": extract_id(entry)}
+
+        mock_deliver = AsyncMock(return_value=True)
+        with patch("twitter_telegram_bot.db", mock_db), \
+             patch("twitter_telegram_bot.fetch_feed", new=AsyncMock(return_value=entries)), \
+             patch("twitter_telegram_bot.build_content", new=AsyncMock(side_effect=build)), \
+             patch("twitter_telegram_bot.deliver", new=mock_deliver), \
+             patch("twitter_telegram_bot.MAX_TWEETS_PER_CHECK", 10), \
+             patch("twitter_telegram_bot.asyncio.sleep", new=AsyncMock()):
+            await process_user("user", "1000", MagicMock(), asyncio.Semaphore(1))
+
+        sent_ids = [call.args[0]["tid"] for call in mock_deliver.await_args_list]
+        self.assertEqual(sent_ids, [str(tweet_id) for tweet_id in range(1001, 1011)])
+        self.assertEqual(mock_db.update_last_id.call_args.args, ("user", "1010"))
+
+    async def test_process_user_keeps_cursor_when_delivery_fails(self):
+        entry = {
+            "id": "1001",
+            "link": "https://x.com/user/status/1001",
+            "title": "post 1001",
+        }
+        mock_db = MagicMock()
+        mock_db.get_subs_for_user.return_value = ["chat"]
+        mock_deliver = AsyncMock(return_value=False)
+        with patch("twitter_telegram_bot.db", mock_db), \
+             patch("twitter_telegram_bot.fetch_feed", new=AsyncMock(return_value=[entry])), \
+             patch("twitter_telegram_bot.build_content", new=AsyncMock(return_value={"tid": "1001"})), \
+             patch("twitter_telegram_bot.deliver", new=mock_deliver), \
+             patch("twitter_telegram_bot.asyncio.sleep", new=AsyncMock()):
+            await process_user("user", "1000", MagicMock(), asyncio.Semaphore(1))
+
+        mock_db.update_last_id.assert_not_called()
+
     async def test_fetch_feed_drops_reposts_and_keeps_originals(self):
         """A feed with a repost and an own tweet returns only the own tweet."""
         items = (
@@ -324,12 +415,11 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         with patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), patch("twitter_telegram_bot.http", client):
             entries = await fetch_feed("ripplesupport")
         self.assertEqual([str(e.get("title")) for e in entries], ["My own news"])
-        # Parallel mirror race: every mirror is tried once (simultaneously), the first
-        # usable feed wins.
+        # All mirrors are queried and duplicate tweet IDs are merged.
         self.assertEqual(client.get.await_count, len(RSS_SOURCES))
 
-    async def test_fetch_feed_all_reposts_does_not_hammer_mirrors(self):
-        """An all-reposts feed is a complete answer, not a reason to try every mirror."""
+    async def test_fetch_feed_discards_reposts_from_all_mirrors(self):
+        """Repost-only feeds produce no original entries after checking all mirrors."""
         items = (
             "<item><title>RT by @ripplesupport: Someone else</title>"
             "<link>https://nitter.cz/nasa/status/3</link><dc:creator>@nasa</dc:creator>"

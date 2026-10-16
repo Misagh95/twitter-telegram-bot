@@ -187,7 +187,7 @@ twitter-telegram-bot/
 | `TRANSLATION_RETRIES` | `2` | Retries for the primary AI/Google translation attempts |
 | `TRANSLATION_CONCURRENT_LIMIT` | `1` | Parallel translation calls (keep low to avoid Google rate limits) |
 | `TRANSLATION_BACKFILL_LIMIT` | `15` | Saved untranslated tweets repaired per backfill run |
-| `MAX_TWEETS_PER_CHECK` | `10` | New tweets processed per account each check |
+| `MAX_TWEETS_PER_CHECK` | `10` | Unseen posts sent per account per check; older backlog continues next check |
 | `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback translator |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
 | `LOG_LEVEL` | `INFO` | Set to `DEBUG` to log why each feed entry was kept or skipped |

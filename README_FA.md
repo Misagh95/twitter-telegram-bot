@@ -124,7 +124,7 @@ python twitter_telegram_bot.py
 | `TRANSLATION_RETRIES` | `2` | تعداد تلاش دوباره برای تلاش‌های اصلی AI/Google |
 | `TRANSLATION_CONCURRENT_LIMIT` | `1` | تعداد ترجمه همزمان (برای جلوگیری از محدودیت گوگل کم نگه دار) |
 | `TRANSLATION_BACKFILL_LIMIT` | `15` | تعداد توییت‌های بدون ترجمه که در هر نوبت ترمیم می‌شوند |
-| `MAX_TWEETS_PER_CHECK` | `10` | تعداد توییت جدید پردازش‌شده برای هر اکانت در هر بررسی |
+| `MAX_TWEETS_PER_CHECK` | `10` | تعداد پست‌های ارسال‌شده برای هر حساب در هر نوبت؛ بقیهٔ موارد در نوبت بعد ادامه می‌یابد |
 | `MYMEMORY_SOURCE_LANG` | `en` | زبان مبدأ برای fallback غیرگوگلی ترجمه |
 | `MYMEMORY_EMAIL` | خالی | ایمیل اختیاری برای سقف رایگان بالاتر MyMemory |
 | `LOG_LEVEL` | `INFO` | روی `DEBUG` بگذار تا دلیل نگه‌داشتن یا حذف هر آیتم فید لاگ شود |
