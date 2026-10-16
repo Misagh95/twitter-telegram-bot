@@ -12,7 +12,11 @@ from twitter_telegram_bot import (
     deliver,
     escape_and_truncate,
     extract_author_username,
+    extract_id,
+    extract_image_url,
     fetch_feed,
+    _fetch_x_api_feed,
+    _x_api_entries_from_payload,
     is_retweet,
     run_translation_backfill,
     translate_text,
@@ -276,6 +280,9 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
             + "</channel></rss>"
         )
 
+    def test_public_rsshub_is_in_rss_fallback_sources(self):
+        self.assertTrue(any(source.endswith("/twitter/user/{username}") for source in RSS_SOURCES))
+
     async def test_fetch_feed_drops_reposts_and_keeps_originals(self):
         """A feed with a repost and an own tweet returns only the own tweet."""
         items = (
@@ -290,7 +297,7 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         resp.url = "https://nitter.cz/ripplesupport/rss"
         client = MagicMock()
         client.get = AsyncMock(return_value=resp)
-        with patch("twitter_telegram_bot.http", client):
+        with patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), patch("twitter_telegram_bot.http", client):
             entries = await fetch_feed("ripplesupport")
         self.assertEqual([str(e.get("title")) for e in entries], ["My own news"])
         # Parallel mirror race: every mirror is tried once (simultaneously), the first
@@ -308,10 +315,62 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         resp.url = "https://nitter.cz/ripplesupport/rss"
         client = MagicMock()
         client.get = AsyncMock(return_value=resp)
-        with patch("twitter_telegram_bot.http", client):
+        with patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), patch("twitter_telegram_bot.http", client):
             entries = await fetch_feed("ripplesupport")
         self.assertEqual(entries, [])
         self.assertEqual(client.get.await_count, len(RSS_SOURCES))
+
+    def test_x_api_payload_converts_text_ids_links_and_images(self):
+        payload = {
+            "data": [{
+                "id": "2110376229941674267",
+                "text": "A new wallet update",
+                "created_at": "2026-10-15T07:20:00Z",
+                "attachments": {"media_keys": ["3_123"]},
+            }],
+            "includes": {"media": [{
+                "media_key": "3_123",
+                "type": "photo",
+                "url": "https://pbs.twimg.com/media/example.jpg",
+            }]},
+        }
+
+        entry = _x_api_entries_from_payload("slushwallet", payload)[0]
+        self.assertEqual(extract_id(entry), "2110376229941674267")
+        self.assertEqual(entry["title"], "A new wallet update")
+        self.assertEqual(entry["link"], "https://x.com/slushwallet/status/2110376229941674267")
+        self.assertEqual(extract_image_url(entry), "https://pbs.twimg.com/media/example.jpg")
+        self.assertFalse(is_retweet(entry, "slushwallet"))
+
+    async def test_fetch_x_api_feed_uses_bearer_and_excludes_replies(self):
+        user_response = MagicMock(status_code=200)
+        user_response.json.return_value = {"data": {"id": "12345", "username": "slushwallet"}}
+        timeline_response = MagicMock(status_code=200)
+        timeline_response.json.return_value = {
+            "data": [{"id": "2110376229941674267", "text": "A new wallet update"}],
+        }
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=[user_response, timeline_response])
+
+        with patch("twitter_telegram_bot.X_BEARER_TOKEN", "test-bearer"), \
+             patch("twitter_telegram_bot.http", client), \
+             patch("twitter_telegram_bot.x_user_id_cache", {}):
+            entries = await _fetch_x_api_feed("slushwallet")
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["id"], "2110376229941674267")
+        self.assertEqual(client.get.await_count, 2)
+        self.assertEqual(client.get.await_args_list[0].kwargs["headers"]["Authorization"], "Bearer test-bearer")
+        self.assertEqual(client.get.await_args_list[1].kwargs["params"]["exclude"], "retweets,replies")
+
+    async def test_fetch_feed_prefers_official_x_api_when_configured(self):
+        api_entries = [{"id": "123", "title": "Recent post"}]
+        with patch("twitter_telegram_bot.X_BEARER_TOKEN", "test-bearer"), \
+             patch("twitter_telegram_bot._fetch_x_api_feed", new=AsyncMock(return_value=api_entries)), \
+             patch("twitter_telegram_bot.http") as client:
+            entries = await fetch_feed("slushwallet")
+        self.assertEqual(entries, api_entries)
+        client.get.assert_not_called()
 
     async def test_empty_translation_never_cached(self):
         """Empty translation results must never be added to cache."""

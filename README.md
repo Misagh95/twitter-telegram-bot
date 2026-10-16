@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <b>Forward tweets to Telegram — no paid API needed.</b><br>
-  Uses RSS feeds. Supports AI-powered Persian translation.<br>
+  <b>Forward new posts from X to Telegram.</b><br>
+  Works without an X API token via RSSHub and public RSS mirrors; the official X API v2 is an optional, more direct source. Public feeds may be unavailable. Supports AI-powered Persian translation.<br>
   Includes a live web dashboard + PWA.
 </p>
 
@@ -62,6 +62,10 @@ Create a `.env` file:
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
+# Optional: only if you have X API read access
+# X_BEARER_TOKEN=your_x_api_bearer_token
+# Optional: use another RSSHub instance
+# RSSHUB_BASE_URL=https://rsshub.app
 
 # AI Translation (optional)
 TRANSLATE_FA=true
@@ -70,6 +74,8 @@ REQUESTY_API_KEY=your_gemini_api_key
 REQUESTY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 REQUESTY_MODEL=gemini-2.0-flash
 ```
+
+`X_BEARER_TOKEN` is optional. Without it, the bot tries the public RSSHub route (`https://rsshub.app/twitter/user/<username>`) and other RSS mirrors; these public services can be rate-limited or unavailable. If you have X API read access, set its Bearer Token in your host's secrets (never commit or paste it). You can point `RSSHUB_BASE_URL` at another RSSHub instance.
 
 ### 4. Run
 
@@ -133,6 +139,8 @@ Searches saved tweets and shares them inline.
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Your bot token |
 | `DATABASE_URL` | Auto-set by Railway |
+| `X_BEARER_TOKEN` | Optional Bearer Token with X API read access; otherwise RSSHub/RSS mirrors are used |
+| `RSSHUB_BASE_URL` | Optional; defaults to `https://rsshub.app` |
 | `REQUESTY_API_KEY` | Your Gemini key |
 | `REQUESTY_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `REQUESTY_MODEL` | `gemini-2.0-flash` |
@@ -164,6 +172,10 @@ twitter-telegram-bot/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `X_BEARER_TOKEN` | empty | Optional X API v2 Bearer Token; used when configured |
+| `X_API_BASE_URL` | `https://api.x.com/2` | X API v2 base URL |
+| `X_USER_ID_CACHE_TTL` | `86400` | Cache lifetime for resolved X user IDs (seconds) |
+| `RSSHUB_BASE_URL` | `https://rsshub.app` | RSSHub instance included among RSS sources when X API is not configured or fails |
 | `CHECK_INTERVAL` | `300` | Check interval (seconds) |
 | `TRANSLATE_FA` | `true` | Enable Persian translation |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | empty | AI provider key for higher quality translation |
@@ -182,9 +194,9 @@ twitter-telegram-bot/
 
 ## 📝 Notes
 
-- ❌ Private accounts won't work (RSS limitation)
-- ✅ Multiple Nitter instances for reliability
-- ✅ Bot auto-switches if one instance is down
+- ❌ Private accounts require authenticated access
+- ✅ Official X API v2 is used when `X_BEARER_TOKEN` is configured
+- ⚠️ Without it, public RSSHub and Nitter mirrors are tried but are best-effort and may be unavailable
 - ✅ Retweets/reposts are filtered out; a display name (e.g. `RippleX`) is never mistaken for a handle, so accounts stay visible
 - ✅ With `LOG_LEVEL=DEBUG` every skipped entry is logged with its reason (e.g. `Skip @nasa 123: status link is @nasa`)
 - ✅ Single Telegram card per tweet: long captions are auto-truncated without splitting into separate messages

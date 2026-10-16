@@ -1,4 +1,4 @@
-import os, asyncio, logging, feedparser, re, httpx, html, hashlib
+import os, asyncio, logging, feedparser, re, httpx, html, hashlib, time
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -19,6 +19,9 @@ load_dotenv()
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
+X_API_BASE_URL = (os.getenv("X_API_BASE_URL") or "https://api.x.com/2").strip().rstrip("/")
+X_USER_ID_CACHE_TTL = max(60, int(os.getenv("X_USER_ID_CACHE_TTL", "86400")))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "3"))
 
@@ -64,6 +67,37 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=getattr(logging, LOG_LEVEL, logging.INFO),
 )
+
+
+class _TelegramTokenRedactionFilter(logging.Filter):
+    """Keep HTTP client logs useful without exposing the bot token in request URLs."""
+
+    _url_pattern = re.compile(r"(?i)(https?://api\.telegram\.org/bot)[^\s/\"']+")
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = self._url_pattern.sub(r"\1[REDACTED]", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+_token_redaction_filter = _TelegramTokenRedactionFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_token_redaction_filter)
+
+# httpx/httpcore log every request and protocol event at INFO/DEBUG; python-
+# telegram's DEBUG logs can also include full message text and chat IDs. Keep
+# those third-party logs quiet while preserving this module's own DEBUG diagnostics.
+# The token filter is defense in depth for any Telegram URL that reaches a handler.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 db = Database()
@@ -71,15 +105,22 @@ if not db.enabled:
     logger.warning("Running without database - /add, /list, dashboard disabled")
 if not TOKEN:
     logger.critical("TELEGRAM_BOT_TOKEN is not set! Bot polling will fail. Add it to your .env file.")
+if X_BEARER_TOKEN:
+    logger.info("Official X API source is configured; public RSS is a fallback.")
+else:
+    logger.warning("X_BEARER_TOKEN is not set; tweet checks will rely on public RSSHub/RSS mirrors, which may be unavailable.")
 app = FastAPI()
 templates = Jinja2Templates(directory=os.path.join(BASE_PATH, "templates"))
 
 http: httpx.AsyncClient = None
 bot_app_ref = None
 translations_cache = {}
+x_user_id_cache = {}
 translation_sem = asyncio.Semaphore(max(1, TRANSLATION_CONCURRENT_LIMIT))
 
+RSSHUB_BASE_URL = (os.getenv("RSSHUB_BASE_URL") or "https://rsshub.app").strip().rstrip("/")
 RSS_SOURCES = [
+    f"{RSSHUB_BASE_URL}/twitter/user/{{username}}",
     "https://nitter.net/{username}/rss",
     "https://xcancel.com/{username}/rss",
     "https://nitter.perennialte.ch/{username}/rss",
@@ -590,7 +631,11 @@ async def _try_feed_instance(url, target_username):
     """Fetch and parse one Nitter instance. Returns list of valid entries or None."""
     try:
         resp = await http.get(url, timeout=12, follow_redirects=True)
-        if resp.status_code != 200 or "uni-sonia" in str(resp.url):
+        if resp.status_code != 200:
+            logger.debug("Feed %s returned HTTP %s", resp.url, resp.status_code)
+            return None
+        if "uni-sonia" in str(resp.url):
+            logger.debug("Feed %s redirected to a challenge page", resp.url)
             return None
         feed = await asyncio.to_thread(feedparser.parse, resp.text)
         valid = []
@@ -609,22 +654,127 @@ async def _try_feed_instance(url, target_username):
             valid.append(entry)
         if skipped_retweets:
             logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, target_username)
+        if not usable_feed:
+            logger.debug("Feed %s returned HTTP 200 but no identifiable tweet entries", resp.url)
         # A parsed feed is a complete answer even when it only held reposts; trying the
         # next mirror would repeat the same result and burn its rate limit for nothing.
         return valid if usable_feed else None
     except Exception as e:
-        logger.debug("Feed %s failed: %s", url, e)
+        # Some httpx timeout/connect exceptions stringify to an empty string; include
+        # their type and repr so Railway logs explain why a mirror was unusable.
+        logger.debug("Feed %s failed (%s): %r", url, type(e).__name__, e)
         return None
 
 
-async def fetch_feed(username):
-    """Query all Nitter mirrors in parallel; the first usable feed wins.
+def _x_api_entries_from_payload(username, payload):
+    """Convert an X API v2 timeline response to the dict shape used by RSS entries."""
+    includes = payload.get("includes") or {}
+    media_by_key = {
+        str(media.get("media_key")): media
+        for media in includes.get("media", []) or []
+        if isinstance(media, dict) and media.get("media_key")
+    }
+    entries = []
+    for tweet in payload.get("data", []) or []:
+        if not isinstance(tweet, dict):
+            continue
+        tweet_id = str(tweet.get("id") or "").strip()
+        if not tweet_id:
+            continue
+        media_content = []
+        for media_key in (tweet.get("attachments") or {}).get("media_keys", []) or []:
+            media = media_by_key.get(str(media_key), {})
+            image_url = media.get("url") or media.get("preview_image_url")
+            if image_url:
+                media_content.append({"url": image_url})
+        text = str(tweet.get("text") or "")
+        link = f"https://x.com/{username}/status/{tweet_id}"
+        entries.append({
+            "id": tweet_id,
+            "guid": tweet_id,
+            "link": link,
+            "title": text,
+            "summary": text,
+            "description": text,
+            "author": f"@{username}",
+            "media_content": media_content,
+            "published": tweet.get("created_at", ""),
+        })
+    return entries
 
-    Unlike sequential failover (up to 8 x 12s of timeouts when several
-    mirrors are down), the parallel race finishes in a single round trip —
-    all mirrors still get queried, so none is systematically favoured.
+
+async def _fetch_x_api_feed(username):
+    """Fetch a user's recent original posts from the official X API.
+
+    Returns a list (possibly empty) on a successful response, or None when the
+    API is unavailable/unauthorized so callers can try the RSS fallback.
     """
+    if not X_BEARER_TOKEN:
+        return None
+    if http is None:
+        logger.warning("X API client is not initialized; cannot fetch @%s", username)
+        return None
+
+    async def get_json(path, params=None):
+        try:
+            response = await http.get(
+                f"{X_API_BASE_URL}{path}",
+                params=params,
+                headers={"Authorization": f"Bearer {X_BEARER_TOKEN}"},
+                timeout=15,
+            )
+        except Exception as e:
+            logger.warning("X API request failed for @%s (%s): %r", username, type(e).__name__, e)
+            return None
+        if response.status_code != 200:
+            logger.warning("X API request for @%s returned HTTP %s", username, response.status_code)
+            return None
+        try:
+            return response.json()
+        except ValueError as e:
+            logger.warning("X API returned invalid JSON for @%s: %r", username, e)
+            return None
+
+    normalized = clean_username(username)
+    cached_user = x_user_id_cache.get(normalized)
+    now = time.monotonic()
+    if cached_user and now - cached_user[1] < X_USER_ID_CACHE_TTL:
+        user_id = cached_user[0]
+    else:
+        user_payload = await get_json(f"/users/by/username/{normalized}")
+        user_data = user_payload.get("data") if isinstance(user_payload, dict) else None
+        user_id = str(user_data.get("id") or "") if isinstance(user_data, dict) else ""
+        if not user_id:
+            logger.warning("X API could not resolve user @%s; trying RSS fallback", normalized)
+            return None
+        if len(x_user_id_cache) > 1000:
+            x_user_id_cache.clear()
+        x_user_id_cache[normalized] = (user_id, now)
+
+    params = {
+        "max_results": 100,
+        "exclude": "retweets,replies",
+        "tweet.fields": "created_at,attachments,entities,referenced_tweets",
+        "expansions": "attachments.media_keys",
+        "media.fields": "media_key,type,url,preview_image_url",
+    }
+    timeline = await get_json(f"/users/{user_id}/tweets", params=params)
+    if not isinstance(timeline, dict):
+        logger.warning("X API timeline response was not an object for @%s", normalized)
+        return None
+    entries = _x_api_entries_from_payload(normalized, timeline)
+    logger.debug("X API returned %s recent posts for @%s", len(entries), normalized)
+    return entries
+
+
+async def fetch_feed(username):
+    """Prefer X API when configured; otherwise/failure, race the public RSS mirrors."""
     target_username = clean_username(username)
+    if X_BEARER_TOKEN:
+        api_entries = await _fetch_x_api_feed(target_username)
+        if api_entries is not None:
+            return api_entries
+        logger.warning("Falling back to public RSS mirrors for @%s", target_username)
     # NOTE: raw coroutines must never be .close()'d after being handed to
     # as_completed (it wraps every one of them in a Task up front), so keep
     # explicit Tasks and cancel them instead — closing the coroutine under a
@@ -638,6 +788,11 @@ async def fetch_feed(username):
             result = await fut
             if result is not None:
                 return result
+        logger.warning(
+            "No usable RSS feed for @%s: all %s mirrors failed or returned empty data.",
+            target_username,
+            len(tasks),
+        )
         return []
     finally:
         for t in tasks:
@@ -1134,14 +1289,34 @@ async def process_user(username, last_id, bot, sem):
 
 
 async def check_updates(context):
-    tracked = db.get_all_tracked()
+    started_at = time.monotonic()
+    tracked = db.get_all_tracked() or []
+    if not tracked:
+        logger.info("Update check finished: no tracked accounts in the database.")
+        return
+
+    logger.info("Checking feeds for %s tracked accounts.", len(tracked))
     bot = context.application.bot
     sem = asyncio.Semaphore(CONCURRENT_LIMIT)
     tasks = [process_user(u, li, bot, sem) for u, li in tracked]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for (u, _), r in zip(tracked, results):
-        if isinstance(r, Exception):
-            logger.error(f"Error processing @{u}: {r}")
+    failures = 0
+    for (username, _), result in zip(tracked, results):
+        if isinstance(result, Exception):
+            failures += 1
+            logger.error(
+                "Error processing @%s: %s",
+                username,
+                result,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+
+    logger.info(
+        "Feed check finished in %.1f seconds (%s accounts, %s errors).",
+        time.monotonic() - started_at,
+        len(tracked),
+        failures,
+    )
 
 
 async def run_translation_backfill(context):

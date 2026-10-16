@@ -4,7 +4,7 @@
 
 # 🐦 ربات تلگرام فالوور توییتر / X
 
-> بدون نیاز به API پولی توییتر — با RSS کار میکنه.
+> بدون X API هم کار می‌کند: RSSHub عمومی و آینه‌های RSS را امتحان می‌کند. پایداری این منابع تضمین‌شده نیست؛ X API رسمی اختیاری است.
 > هر وقت اکانت‌هایی که اضافه کردی توییت جدید بزنن، مستقیم داخل تلگرام برات میفرسته. با متن + عکس + ترجمه فارسی.
 
 ---
@@ -43,6 +43,11 @@ pip install -r requirements.txt
 
 ```env
 TELEGRAM_BOT_TOKEN=توکنی که از BotFather گرفتی
+DATABASE_URL=آدرس PostgreSQL
+# اختیاری: فقط اگر دسترسی X API داری
+# X_BEARER_TOKEN=توکن Bearer از X Developer Portal
+# اختیاری: آدرس یک RSSHub دیگر
+# RSSHUB_BASE_URL=https://rsshub.app
 ADMIN_CHAT_ID=چت آیدی خودت (اختیاری)
 
 # ترجمه فارسی (اختیاری)
@@ -52,6 +57,8 @@ REQUESTY_API_KEY=your_requesty_or_gemini_key
 REQUESTY_BASE_URL=https://api.openai.com/v1
 REQUESTY_MODEL=gpt-4o-mini
 ```
+
+`X_BEARER_TOKEN` اجباری نیست؛ بدون آن ربات از RSSHub عمومی (`https://rsshub.app/twitter/user/<username>`) و سپس آینه‌های دیگر استفاده می‌کند. این سرویس‌های عمومی ممکن است محدود یا قطع شوند. اگر X API داری، می‌توانی Bearer Token را در Railway Variables تنظیم کنی؛ هرگز آن را در چت یا Git قرار نده. برای استفاده از RSSHub دیگری، `RSSHUB_BASE_URL` را تغییر بده.
 
 ---
 
@@ -84,6 +91,7 @@ python twitter_telegram_bot.py
 1. Railway.app → یه پروژه بساز
 2. PostgreSQL دیتابیس اضافه کن
 3. متغیر `DATABASE_URL` خودکار ست میشه
+4. در Variables سرویس، `TELEGRAM_BOT_TOKEN` را تنظیم کن. `X_BEARER_TOKEN` اختیاری است؛ بدون آن ربات RSSHub و RSSهای عمومی را امتحان می‌کند.
 
 ---
 
@@ -103,6 +111,10 @@ python twitter_telegram_bot.py
 
 | متغیر | پیش‌فرض | توضیح |
 |-------|---------|-------|
+| `X_BEARER_TOKEN` | خالی | اختیاری؛ با تنظیم آن دریافت timeline از X API انجام می‌شود |
+| `X_API_BASE_URL` | `https://api.x.com/2` | ریشهٔ API نسخهٔ ۲ X |
+| `X_USER_ID_CACHE_TTL` | `86400` | مدت نگهداری شناسهٔ کاربر X در حافظه (ثانیه) |
+| `RSSHUB_BASE_URL` | `https://rsshub.app` | آدرس RSSHub که در حالت بدون X API همراه دیگر منابع RSS امتحان می‌شود |
 | `CHECK_INTERVAL` | `300` | فاصله بررسی (ثانیه) |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
 | `CONCURRENT_LIMIT` | `3` | تعداد درخواست همزمان برای دریافت فید |
@@ -119,8 +131,8 @@ python twitter_telegram_bot.py
 
 ### 📝 نکات
 
-- اکانت‌های **خصوصی / Private** کار نمیکنن
-- اگر یک Nitter فیلتر بود، ربات خودش از بقیه امتحان میکنه
+- اکانت‌های **خصوصی / Private** بدون دسترسی مناسب X API/RSS قابل‌خواندن نیستند
+- با تنظیم `X_BEARER_TOKEN` ربات از X API رسمی استفاده می‌کند؛ بدون آن RSSHub عمومی و RSSهای دیگر را امتحان می‌کند، اما دسترسی این منابع عمومی تضمینی نیست
 - ریتوییت‌ها/repostها فیلتر میشن و ارسال نمیشن؛ فیلتر فقط به یوزرنیم واقعی (یعنی لینک استاتوس یا `@handle` موجود در فید) نگاه می‌کنه و نام نمایشی هرگز جای یوزرنیم حساب نمیشه
 - با `LOG_LEVEL=DEBUG` دلیل حذف هر توییت لاگ میشه (مثلاً `Skip @nasa 123: status link is @nasa`)
 - هر توییت به صورت یک کارت تکی در تلگرام ارسال می‌شود؛ در صورت طولانی شدن کپشن، متن و ترجمه به صورت خودکار خلاصه می‌شوند و هرگز پیام جداگانه‌ای ارسال نمی‌شود
