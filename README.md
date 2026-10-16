@@ -182,6 +182,7 @@ twitter-telegram-bot/
 | `DASHBOARD_URL` | `http://localhost:8080` | Dashboard URL |
 | `CONCURRENT_LIMIT` | `3` | Parallel feed fetch limit |
 | `TRANSLATION_TIMEOUT` | `20` | Timeout per translation attempt (seconds) |
+| `TRANSLATION_DELIVERY_TIMEOUT` | `15` | Maximum wait for translation before sending the original post |
 | `TRANSLATION_RETRIES` | `2` | Retries for the primary AI/Google translation attempts |
 | `TRANSLATION_CONCURRENT_LIMIT` | `1` | Parallel translation calls (keep low to avoid Google rate limits) |
 | `TRANSLATION_BACKFILL_LIMIT` | `15` | Saved untranslated tweets repaired per backfill run |

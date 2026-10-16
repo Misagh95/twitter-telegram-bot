@@ -372,6 +372,25 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries, api_entries)
         client.get.assert_not_called()
 
+    async def test_build_content_sends_without_translation_if_provider_stalls(self):
+        async def slow_translation(_text):
+            await asyncio.sleep(0.1)
+            return "translated"
+
+        tweet_id = "2110376229941674267"
+        entry = {
+            "id": tweet_id,
+            "link": f"https://x.com/slushwallet/status/{tweet_id}",
+            "title": "A new wallet update",
+        }
+        with patch("twitter_telegram_bot.TRANSLATION_DELIVERY_TIMEOUT", 0.01), \
+             patch("twitter_telegram_bot.translate_text", new=AsyncMock(side_effect=slow_translation)):
+            content = await build_content("slushwallet", entry)
+
+        self.assertIsNotNone(content)
+        self.assertEqual(content["title"], "A new wallet update")
+        self.assertEqual(content["translation"], "")
+
     async def test_empty_translation_never_cached(self):
         """Empty translation results must never be added to cache."""
         with patch("twitter_telegram_bot._translate_with_requesty", new=AsyncMock(return_value="")):

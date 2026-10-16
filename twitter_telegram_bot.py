@@ -54,6 +54,7 @@ else:
     REQUESTY_MODEL = "posiden/deepseek-v4-flash"
 TRANSLATE_FA = os.getenv("TRANSLATE_FA", "true").lower() in ("1", "true", "yes")
 TRANSLATION_TIMEOUT = float(os.getenv("TRANSLATION_TIMEOUT", "20"))
+TRANSLATION_DELIVERY_TIMEOUT = max(1.0, float(os.getenv("TRANSLATION_DELIVERY_TIMEOUT", "15")))
 TRANSLATION_RETRIES = int(os.getenv("TRANSLATION_RETRIES", "2"))
 TRANSLATION_CONCURRENT_LIMIT = int(os.getenv("TRANSLATION_CONCURRENT_LIMIT", "1"))
 TRANSLATION_BACKFILL_LIMIT = int(os.getenv("TRANSLATION_BACKFILL_LIMIT", "15"))
@@ -1078,7 +1079,20 @@ async def build_content(username, entry):
     if not tid or is_retweet(entry, username):
         return None
     title = extract_tweet_text(entry)
-    translation = await translate_text(title)
+    try:
+        translation = await asyncio.wait_for(
+            translate_text(title),
+            timeout=TRANSLATION_DELIVERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        # Deliver the original post even when a translation provider stalls; a
+        # saved untranslated post can be repaired later by the backfill job.
+        logger.warning(
+            "Translation exceeded %.1fs for @%s; continuing without translation",
+            TRANSLATION_DELIVERY_TIMEOUT,
+            username,
+        )
+        translation = ""
     img_url = extract_image_url(entry)
     link = f"https://x.com/i/status/{tid}"
     return {
