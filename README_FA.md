@@ -115,6 +115,9 @@ python twitter_telegram_bot.py
 | `X_API_BASE_URL` | `https://api.x.com/2` | ریشهٔ API نسخهٔ ۲ X |
 | `X_USER_ID_CACHE_TTL` | `86400` | مدت نگهداری شناسهٔ کاربر X در حافظه (ثانیه) |
 | `RSSHUB_BASE_URL` | `https://rsshub.app` | آدرس RSSHub که در حالت بدون X API همراه دیگر منابع RSS امتحان می‌شود |
+| `HTTP_MAX_CONNECTIONS` | `50` | اندازهٔ pool اتصال HTTP؛ برای درخواست‌های RSS ظرفیت اضافه نگه می‌دارد |
+| `RSS_FETCH_TIMEOUT` | `12` | حداکثر زمان بررسی آینه‌های RSS برای هر حساب (ثانیه) |
+| `RSS_MERGE_GRACE` | `0.25` | زمان کوتاه برای ادغام پاسخ آینه‌های سریع پس از اولین فید قابل‌استفاده |
 | `CHECK_INTERVAL` | `300` | فاصله بررسی (ثانیه) |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
 | `CONCURRENT_LIMIT` | `3` | تعداد حساب‌هایی که هم‌زمان بررسی می‌شوند |

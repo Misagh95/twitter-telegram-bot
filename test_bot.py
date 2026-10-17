@@ -334,6 +334,7 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         }
 
         async def get(url, **_kwargs):
+            await asyncio.sleep(0.02)
             return responses[url]
 
         client = MagicMock()
@@ -351,6 +352,65 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(entries), 3)
         self.assertEqual(client.get.await_count, 2)
+
+    async def test_fetch_feed_cancels_slow_mirrors_after_first_original_feed(self):
+        slow_cancelled = asyncio.Event()
+        rss = self._rss(
+            "<item><title>new post</title>"
+            "<link>https://x.com/user/status/2111000000000000003</link>"
+            "<description>new post</description></item>"
+        )
+        fast_response = MagicMock(
+            status_code=200,
+            text=rss,
+            url="https://fast.example/user/rss",
+        )
+
+        async def get(url, **_kwargs):
+            if "slow.example" in url:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+            return fast_response
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://fast.example/{username}/rss",
+            "https://slow.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.RSS_MERGE_GRACE", 0), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual([extract_id(entry) for entry in entries], ["2111000000000000003"])
+        self.assertTrue(slow_cancelled.is_set())
+
+    async def test_fetch_feed_cancels_all_mirrors_at_overall_deadline(self):
+        cancelled = 0
+
+        async def get(_url, **_kwargs):
+            nonlocal cancelled
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://slow-a.example/{username}/rss",
+            "https://slow-b.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.RSS_FETCH_TIMEOUT", 0.02), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual(entries, [])
+        self.assertEqual(cancelled, 2)
 
     async def test_process_user_batches_oldest_unseen_posts_without_skipping(self):
         entries = [

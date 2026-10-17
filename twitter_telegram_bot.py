@@ -24,9 +24,13 @@ X_API_BASE_URL = (os.getenv("X_API_BASE_URL") or "https://api.x.com/2").strip().
 X_USER_ID_CACHE_TTL = max(60, int(os.getenv("X_USER_ID_CACHE_TTL", "86400")))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "3"))
+HTTP_MAX_CONNECTIONS = max(50, int(os.getenv("HTTP_MAX_CONNECTIONS", "50")))
 # Each tracked account fans out to several RSS mirrors; cap requests globally so
 # concurrent accounts cannot exhaust httpx's connection pool and raise PoolTimeout.
 RSS_FETCH_CONCURRENCY = max(1, int(os.getenv("RSS_FETCH_CONCURRENCY", "12")))
+# Bound every account's mirror sweep and only wait briefly to merge other fast replies.
+RSS_FETCH_TIMEOUT = max(1.0, float(os.getenv("RSS_FETCH_TIMEOUT", "12")))
+RSS_MERGE_GRACE = max(0.0, float(os.getenv("RSS_MERGE_GRACE", "0.25")))
 
 PLACEHOLDER_API_KEYS = {"key", "your_key", "your_api_key", "your_gemini_api_key", "your_requesty_or_gemini_key"}
 
@@ -786,7 +790,7 @@ def _tweet_id_newest_first_key(tweet_id):
 
 
 async def fetch_feed(username):
-    """Fetch all available sources and merge unique original posts for one account."""
+    """Race RSS mirrors, keep repost-only feeds from winning, and cap waiting time."""
     target_username = clean_username(username)
     if X_BEARER_TOKEN:
         api_entries = await _fetch_x_api_feed(target_username)
@@ -797,37 +801,78 @@ async def fetch_feed(username):
             )
         logger.warning("Falling back to public RSS mirrors for @%s", target_username)
 
-    # Merge the mirrors rather than returning the first response: public mirrors often
-    # have different/stale windows, so racing only one can silently miss recent originals.
     sources = list(RSS_SOURCES)
-    tasks = [
+    task_sources = {
         asyncio.create_task(
             _try_feed_instance(src.format(username=target_username), target_username)
-        )
+        ): src
         for src in sources
-    ]
+    }
+    pending = set(task_sources)
+    feed_results = []
+    usable_mirrors = 0
+    first_post_deadline = None
+    loop = asyncio.get_running_loop()
+    overall_deadline = loop.time() + RSS_FETCH_TIMEOUT
     try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Probe mirrors concurrently, but do not wait for every dead/slow host once an
+        # original-post feed has responded. A brief grace period merges other fast feeds.
+        while pending:
+            now = loop.time()
+            remaining = overall_deadline - now
+            if first_post_deadline is not None:
+                remaining = min(remaining, first_post_deadline - now)
+            if remaining <= 0:
+                break
+
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+
+            for task in done:
+                source = task_sources[task]
+                try:
+                    result = task.result()
+                except Exception as exc:
+                    logger.debug(
+                        "Feed task for %s failed (%s): %r",
+                        source,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+                if result is None:
+                    continue
+                usable_mirrors += 1
+                if result:
+                    feed_results.append(result)
+                    if first_post_deadline is None:
+                        first_post_deadline = min(
+                            overall_deadline,
+                            loop.time() + RSS_MERGE_GRACE,
+                        )
+
         merged = {}
-        usable_mirrors = 0
-        for source, result in zip(sources, results):
-            if isinstance(result, BaseException):
-                logger.debug(
-                    "Feed task for %s failed (%s): %r",
-                    source,
-                    type(result).__name__,
-                    result,
-                )
-                continue
-            if result is None:
-                continue
-            usable_mirrors += 1
+        for result in feed_results:
             for entry in result:
                 tweet_id = extract_id(entry)
                 if tweet_id:
                     merged.setdefault(tweet_id, entry)
 
-        if not usable_mirrors:
+        if not merged and pending:
+            logger.warning(
+                "RSS fetch for @%s hit its %.1fs deadline (%s/%s mirrors returned; "
+                "none produced original posts).",
+                target_username,
+                RSS_FETCH_TIMEOUT,
+                usable_mirrors,
+                len(sources),
+            )
+        elif not merged and not usable_mirrors:
             logger.warning(
                 "No usable RSS feed for @%s: all %s mirrors failed or returned empty data.",
                 target_username,
@@ -841,10 +886,9 @@ async def fetch_feed(username):
             )
         else:
             logger.debug(
-                "Collected %s unique original posts from %s/%s RSS mirrors for @%s",
+                "Collected %s unique original posts from %s completed RSS mirrors for @%s",
                 len(merged),
-                usable_mirrors,
-                len(sources),
+                len(feed_results),
                 target_username,
             )
 
@@ -853,11 +897,11 @@ async def fetch_feed(username):
             key=lambda entry: _tweet_id_newest_first_key(extract_id(entry)),
         )
     finally:
-        for task in tasks:
+        for task in task_sources:
             if not task.done():
                 task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if task_sources:
+            await asyncio.gather(*task_sources, return_exceptions=True)
 
 
 # ── Bot Commands ──────────────────────────────────────────────────────────
@@ -1443,7 +1487,21 @@ async def run_cleanup(context):
 @asynccontextmanager
 async def lifespan(fastapi_app):
     global http, bot_app_ref
-    http = httpx.AsyncClient(headers=RSS_HEADERS, timeout=10, follow_redirects=True, limits=httpx.Limits(max_connections=20))
+    http = httpx.AsyncClient(
+        headers=RSS_HEADERS,
+        timeout=10,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=min(20, HTTP_MAX_CONNECTIONS),
+        ),
+    )
+    logger.info(
+        "HTTP pool max_connections=%s; RSS fetch concurrency=%s; per-account RSS deadline=%.1fs",
+        HTTP_MAX_CONNECTIONS,
+        RSS_FETCH_CONCURRENCY,
+        RSS_FETCH_TIMEOUT,
+    )
 
     from telegram.ext import MessageHandler, filters
 
