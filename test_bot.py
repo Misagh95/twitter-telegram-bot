@@ -16,8 +16,10 @@ from twitter_telegram_bot import (
     extract_image_url,
     fetch_feed,
     _fetch_x_api_feed,
+    _try_feed_instance,
     _x_api_entries_from_payload,
     is_retweet,
+    process_user,
     run_translation_backfill,
     translate_text,
     translations_cache,
@@ -283,6 +285,179 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
     def test_public_rsshub_is_in_rss_fallback_sources(self):
         self.assertTrue(any(source.endswith("/twitter/user/{username}") for source in RSS_SOURCES))
 
+    async def test_rss_requests_obey_global_concurrency_limit(self):
+        active = 0
+        peak = 0
+
+        async def slow_get(url, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return MagicMock(status_code=503, url=url)
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=slow_get)
+        with patch("twitter_telegram_bot.http", client), \
+             patch("twitter_telegram_bot.rss_fetch_sem", asyncio.Semaphore(1)):
+            await asyncio.gather(*[
+                _try_feed_instance(f"https://mirror-{i}.example/rss", "user")
+                for i in range(4)
+            ])
+
+        self.assertEqual(peak, 1)
+
+    async def test_fetch_feed_merges_unique_posts_from_all_mirrors(self):
+        def item(tweet_id, title):
+            return (
+                f"<item><title>{title}</title>"
+                f"<link>https://x.com/user/status/{tweet_id}</link>"
+                f"<description>{title}</description></item>"
+            )
+
+        first_feed = self._rss(
+            item("2111000000000000002", "newest")
+            + item("2111000000000000001", "shared")
+        )
+        second_feed = self._rss(
+            item("2111000000000000001", "shared duplicate")
+            + item("2111000000000000000", "older")
+        )
+        responses = {
+            "https://mirror-a.example/user/rss": MagicMock(
+                status_code=200, text=first_feed, url="https://mirror-a.example/user/rss"
+            ),
+            "https://mirror-b.example/user/rss": MagicMock(
+                status_code=200, text=second_feed, url="https://mirror-b.example/user/rss"
+            ),
+        }
+
+        async def get(url, **_kwargs):
+            await asyncio.sleep(0.02)
+            return responses[url]
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://mirror-a.example/{username}/rss",
+            "https://mirror-b.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual(
+            [extract_id(entry) for entry in entries],
+            ["2111000000000000002", "2111000000000000001", "2111000000000000000"],
+        )
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(client.get.await_count, 2)
+
+    async def test_fetch_feed_cancels_slow_mirrors_after_first_original_feed(self):
+        slow_cancelled = asyncio.Event()
+        rss = self._rss(
+            "<item><title>new post</title>"
+            "<link>https://x.com/user/status/2111000000000000003</link>"
+            "<description>new post</description></item>"
+        )
+        fast_response = MagicMock(
+            status_code=200,
+            text=rss,
+            url="https://fast.example/user/rss",
+        )
+
+        async def get(url, **_kwargs):
+            if "slow.example" in url:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+            return fast_response
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://fast.example/{username}/rss",
+            "https://slow.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.RSS_MERGE_GRACE", 0), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual([extract_id(entry) for entry in entries], ["2111000000000000003"])
+        self.assertTrue(slow_cancelled.is_set())
+
+    async def test_fetch_feed_cancels_all_mirrors_at_overall_deadline(self):
+        cancelled = 0
+
+        async def get(_url, **_kwargs):
+            nonlocal cancelled
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=get)
+        with patch("twitter_telegram_bot.RSS_SOURCES", [
+            "https://slow-a.example/{username}/rss",
+            "https://slow-b.example/{username}/rss",
+        ]), patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), \
+             patch("twitter_telegram_bot.RSS_FETCH_TIMEOUT", 0.02), \
+             patch("twitter_telegram_bot.http", client):
+            entries = await fetch_feed("user")
+
+        self.assertEqual(entries, [])
+        self.assertEqual(cancelled, 2)
+
+    async def test_process_user_batches_oldest_unseen_posts_without_skipping(self):
+        entries = [
+            {
+                "id": str(tweet_id),
+                "link": f"https://x.com/user/status/{tweet_id}",
+                "title": f"post {tweet_id}",
+            }
+            for tweet_id in range(1015, 1000, -1)
+        ]
+        mock_db = MagicMock()
+        mock_db.get_subs_for_user.return_value = ["chat"]
+
+        async def build(_username, entry):
+            return {"tid": extract_id(entry)}
+
+        mock_deliver = AsyncMock(return_value=True)
+        with patch("twitter_telegram_bot.db", mock_db), \
+             patch("twitter_telegram_bot.fetch_feed", new=AsyncMock(return_value=entries)), \
+             patch("twitter_telegram_bot.build_content", new=AsyncMock(side_effect=build)), \
+             patch("twitter_telegram_bot.deliver", new=mock_deliver), \
+             patch("twitter_telegram_bot.MAX_TWEETS_PER_CHECK", 10), \
+             patch("twitter_telegram_bot.asyncio.sleep", new=AsyncMock()):
+            await process_user("user", "1000", MagicMock(), asyncio.Semaphore(1))
+
+        sent_ids = [call.args[0]["tid"] for call in mock_deliver.await_args_list]
+        self.assertEqual(sent_ids, [str(tweet_id) for tweet_id in range(1001, 1011)])
+        self.assertEqual(mock_db.update_last_id.call_args.args, ("user", "1010"))
+
+    async def test_process_user_keeps_cursor_when_delivery_fails(self):
+        entry = {
+            "id": "1001",
+            "link": "https://x.com/user/status/1001",
+            "title": "post 1001",
+        }
+        mock_db = MagicMock()
+        mock_db.get_subs_for_user.return_value = ["chat"]
+        mock_deliver = AsyncMock(return_value=False)
+        with patch("twitter_telegram_bot.db", mock_db), \
+             patch("twitter_telegram_bot.fetch_feed", new=AsyncMock(return_value=[entry])), \
+             patch("twitter_telegram_bot.build_content", new=AsyncMock(return_value={"tid": "1001"})), \
+             patch("twitter_telegram_bot.deliver", new=mock_deliver), \
+             patch("twitter_telegram_bot.asyncio.sleep", new=AsyncMock()):
+            await process_user("user", "1000", MagicMock(), asyncio.Semaphore(1))
+
+        mock_db.update_last_id.assert_not_called()
+
     async def test_fetch_feed_drops_reposts_and_keeps_originals(self):
         """A feed with a repost and an own tweet returns only the own tweet."""
         items = (
@@ -300,12 +475,11 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
         with patch("twitter_telegram_bot.X_BEARER_TOKEN", ""), patch("twitter_telegram_bot.http", client):
             entries = await fetch_feed("ripplesupport")
         self.assertEqual([str(e.get("title")) for e in entries], ["My own news"])
-        # Parallel mirror race: every mirror is tried once (simultaneously), the first
-        # usable feed wins.
+        # All mirrors are queried and duplicate tweet IDs are merged.
         self.assertEqual(client.get.await_count, len(RSS_SOURCES))
 
-    async def test_fetch_feed_all_reposts_does_not_hammer_mirrors(self):
-        """An all-reposts feed is a complete answer, not a reason to try every mirror."""
+    async def test_fetch_feed_discards_reposts_from_all_mirrors(self):
+        """Repost-only feeds produce no original entries after checking all mirrors."""
         items = (
             "<item><title>RT by @ripplesupport: Someone else</title>"
             "<link>https://nitter.cz/nasa/status/3</link><dc:creator>@nasa</dc:creator>"
@@ -371,6 +545,25 @@ class TestTweetBot(unittest.IsolatedAsyncioTestCase):
             entries = await fetch_feed("slushwallet")
         self.assertEqual(entries, api_entries)
         client.get.assert_not_called()
+
+    async def test_build_content_sends_without_translation_if_provider_stalls(self):
+        async def slow_translation(_text):
+            await asyncio.sleep(0.1)
+            return "translated"
+
+        tweet_id = "2110376229941674267"
+        entry = {
+            "id": tweet_id,
+            "link": f"https://x.com/slushwallet/status/{tweet_id}",
+            "title": "A new wallet update",
+        }
+        with patch("twitter_telegram_bot.TRANSLATION_DELIVERY_TIMEOUT", 0.01), \
+             patch("twitter_telegram_bot.translate_text", new=AsyncMock(side_effect=slow_translation)):
+            content = await build_content("slushwallet", entry)
+
+        self.assertIsNotNone(content)
+        self.assertEqual(content["title"], "A new wallet update")
+        self.assertEqual(content["translation"], "")
 
     async def test_empty_translation_never_cached(self):
         """Empty translation results must never be added to cache."""
