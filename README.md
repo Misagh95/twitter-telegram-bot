@@ -176,16 +176,21 @@ twitter-telegram-bot/
 | `X_API_BASE_URL` | `https://api.x.com/2` | X API v2 base URL |
 | `X_USER_ID_CACHE_TTL` | `86400` | Cache lifetime for resolved X user IDs (seconds) |
 | `RSSHUB_BASE_URL` | `https://rsshub.app` | RSSHub instance included among RSS sources when X API is not configured or fails |
+| `HTTP_MAX_CONNECTIONS` | `50` | HTTP connection-pool size; leaves room beyond bounded RSS requests |
+| `RSS_FETCH_TIMEOUT` | `12` | Maximum time spent checking RSS mirrors for one account (seconds) |
+| `RSS_MERGE_GRACE` | `0.25` | Extra seconds to merge fast mirror responses after the first usable feed |
 | `CHECK_INTERVAL` | `300` | Check interval (seconds) |
 | `TRANSLATE_FA` | `true` | Enable Persian translation |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | empty | AI provider key for higher quality translation |
 | `DASHBOARD_URL` | `http://localhost:8080` | Dashboard URL |
-| `CONCURRENT_LIMIT` | `3` | Parallel feed fetch limit |
+| `CONCURRENT_LIMIT` | `3` | Number of accounts checked concurrently |
+| `RSS_FETCH_CONCURRENCY` | `12` | Global cap on concurrent RSS HTTP requests (helps prevent connection-pool timeouts) |
 | `TRANSLATION_TIMEOUT` | `20` | Timeout per translation attempt (seconds) |
+| `TRANSLATION_DELIVERY_TIMEOUT` | `15` | Maximum wait for translation before sending the original post |
 | `TRANSLATION_RETRIES` | `2` | Retries for the primary AI/Google translation attempts |
 | `TRANSLATION_CONCURRENT_LIMIT` | `1` | Parallel translation calls (keep low to avoid Google rate limits) |
 | `TRANSLATION_BACKFILL_LIMIT` | `15` | Saved untranslated tweets repaired per backfill run |
-| `MAX_TWEETS_PER_CHECK` | `10` | New tweets processed per account each check |
+| `MAX_TWEETS_PER_CHECK` | `10` | Unseen posts sent per account per check; older backlog continues next check |
 | `MYMEMORY_SOURCE_LANG` | `en` | Source language for the non-Google fallback translator |
 | `MYMEMORY_EMAIL` | empty | Optional MyMemory contact email for higher free limits |
 | `LOG_LEVEL` | `INFO` | Set to `DEBUG` to log why each feed entry was kept or skipped |

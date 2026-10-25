@@ -24,6 +24,13 @@ X_API_BASE_URL = (os.getenv("X_API_BASE_URL") or "https://api.x.com/2").strip().
 X_USER_ID_CACHE_TTL = max(60, int(os.getenv("X_USER_ID_CACHE_TTL", "86400")))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
 CONCURRENT_LIMIT = int(os.getenv("CONCURRENT_LIMIT", "3"))
+HTTP_MAX_CONNECTIONS = max(50, int(os.getenv("HTTP_MAX_CONNECTIONS", "50")))
+# Each tracked account fans out to several RSS mirrors; cap requests globally so
+# concurrent accounts cannot exhaust httpx's connection pool and raise PoolTimeout.
+RSS_FETCH_CONCURRENCY = max(1, int(os.getenv("RSS_FETCH_CONCURRENCY", "12")))
+# Bound every account's mirror sweep and only wait briefly to merge other fast replies.
+RSS_FETCH_TIMEOUT = max(1.0, float(os.getenv("RSS_FETCH_TIMEOUT", "12")))
+RSS_MERGE_GRACE = max(0.0, float(os.getenv("RSS_MERGE_GRACE", "0.25")))
 
 PLACEHOLDER_API_KEYS = {"key", "your_key", "your_api_key", "your_gemini_api_key", "your_requesty_or_gemini_key"}
 
@@ -54,6 +61,7 @@ else:
     REQUESTY_MODEL = "posiden/deepseek-v4-flash"
 TRANSLATE_FA = os.getenv("TRANSLATE_FA", "true").lower() in ("1", "true", "yes")
 TRANSLATION_TIMEOUT = float(os.getenv("TRANSLATION_TIMEOUT", "20"))
+TRANSLATION_DELIVERY_TIMEOUT = max(1.0, float(os.getenv("TRANSLATION_DELIVERY_TIMEOUT", "15")))
 TRANSLATION_RETRIES = int(os.getenv("TRANSLATION_RETRIES", "2"))
 TRANSLATION_CONCURRENT_LIMIT = int(os.getenv("TRANSLATION_CONCURRENT_LIMIT", "1"))
 TRANSLATION_BACKFILL_LIMIT = int(os.getenv("TRANSLATION_BACKFILL_LIMIT", "15"))
@@ -117,6 +125,7 @@ bot_app_ref = None
 translations_cache = {}
 x_user_id_cache = {}
 translation_sem = asyncio.Semaphore(max(1, TRANSLATION_CONCURRENT_LIMIT))
+rss_fetch_sem = asyncio.Semaphore(RSS_FETCH_CONCURRENCY)
 
 RSSHUB_BASE_URL = (os.getenv("RSSHUB_BASE_URL") or "https://rsshub.app").strip().rstrip("/")
 RSS_SOURCES = [
@@ -628,14 +637,15 @@ async def translate_text(text):
 
 
 async def _try_feed_instance(url, target_username):
-    """Fetch and parse one Nitter instance. Returns list of valid entries or None."""
+    """Fetch and parse one RSS source. Returns valid entries or None."""
     try:
-        resp = await http.get(url, timeout=12, follow_redirects=True)
+        async with rss_fetch_sem:
+            resp = await http.get(url, timeout=12, follow_redirects=True)
         if resp.status_code != 200:
-            logger.debug("Feed %s returned HTTP %s", resp.url, resp.status_code)
+            logger.debug("Feed %s -> %s returned HTTP %s", url, resp.url, resp.status_code)
             return None
         if "uni-sonia" in str(resp.url):
-            logger.debug("Feed %s redirected to a challenge page", resp.url)
+            logger.debug("Feed %s -> %s redirected to a challenge page", url, resp.url)
             return None
         feed = await asyncio.to_thread(feedparser.parse, resp.text)
         valid = []
@@ -655,9 +665,9 @@ async def _try_feed_instance(url, target_username):
         if skipped_retweets:
             logger.info("Skipped %s retweets/reposts for @%s", skipped_retweets, target_username)
         if not usable_feed:
-            logger.debug("Feed %s returned HTTP 200 but no identifiable tweet entries", resp.url)
-        # A parsed feed is a complete answer even when it only held reposts; trying the
-        # next mirror would repeat the same result and burn its rate limit for nothing.
+            logger.debug("Feed %s -> %s returned HTTP 200 but no identifiable tweet entries", url, resp.url)
+        # Keep an all-reposts feed distinguishable from a failed/empty endpoint. The
+        # caller still checks the other mirrors and can merge originals from them.
         return valid if usable_feed else None
     except Exception as e:
         # Some httpx timeout/connect exceptions stringify to an empty string; include
@@ -767,39 +777,131 @@ async def _fetch_x_api_feed(username):
     return entries
 
 
+def _tweet_id_sort_key(tweet_id):
+    """Sort X snowflake IDs numerically and keep any nonnumeric IDs deterministic."""
+    value = str(tweet_id or "")
+    return (0, int(value)) if value.isdigit() else (1, value)
+
+
+def _tweet_id_newest_first_key(tweet_id):
+    """Ordering key that puts the greatest numeric X status ID first."""
+    value = str(tweet_id or "")
+    return (0, -int(value)) if value.isdigit() else (1, value)
+
+
 async def fetch_feed(username):
-    """Prefer X API when configured; otherwise/failure, race the public RSS mirrors."""
+    """Race RSS mirrors, keep repost-only feeds from winning, and cap waiting time."""
     target_username = clean_username(username)
     if X_BEARER_TOKEN:
         api_entries = await _fetch_x_api_feed(target_username)
         if api_entries is not None:
-            return api_entries
+            return sorted(
+                api_entries,
+                key=lambda entry: _tweet_id_newest_first_key(extract_id(entry)),
+            )
         logger.warning("Falling back to public RSS mirrors for @%s", target_username)
-    # NOTE: raw coroutines must never be .close()'d after being handed to
-    # as_completed (it wraps every one of them in a Task up front), so keep
-    # explicit Tasks and cancel them instead — closing the coroutine under a
-    # live Task raises "cannot reuse already awaited coroutine".
-    tasks = [
-        asyncio.ensure_future(_try_feed_instance(src.format(username=target_username), target_username))
-        for src in RSS_SOURCES
-    ]
+
+    sources = list(RSS_SOURCES)
+    task_sources = {
+        asyncio.create_task(
+            _try_feed_instance(src.format(username=target_username), target_username)
+        ): src
+        for src in sources
+    }
+    pending = set(task_sources)
+    feed_results = []
+    usable_mirrors = 0
+    first_post_deadline = None
+    loop = asyncio.get_running_loop()
+    overall_deadline = loop.time() + RSS_FETCH_TIMEOUT
     try:
-        for fut in asyncio.as_completed(tasks):
-            result = await fut
-            if result is not None:
-                return result
-        logger.warning(
-            "No usable RSS feed for @%s: all %s mirrors failed or returned empty data.",
-            target_username,
-            len(tasks),
+        # Probe mirrors concurrently, but do not wait for every dead/slow host once an
+        # original-post feed has responded. A brief grace period merges other fast feeds.
+        while pending:
+            now = loop.time()
+            remaining = overall_deadline - now
+            if first_post_deadline is not None:
+                remaining = min(remaining, first_post_deadline - now)
+            if remaining <= 0:
+                break
+
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+
+            for task in done:
+                source = task_sources[task]
+                try:
+                    result = task.result()
+                except Exception as exc:
+                    logger.debug(
+                        "Feed task for %s failed (%s): %r",
+                        source,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+                if result is None:
+                    continue
+                usable_mirrors += 1
+                if result:
+                    feed_results.append(result)
+                    if first_post_deadline is None:
+                        first_post_deadline = min(
+                            overall_deadline,
+                            loop.time() + RSS_MERGE_GRACE,
+                        )
+
+        merged = {}
+        for result in feed_results:
+            for entry in result:
+                tweet_id = extract_id(entry)
+                if tweet_id:
+                    merged.setdefault(tweet_id, entry)
+
+        if not merged and pending:
+            logger.warning(
+                "RSS fetch for @%s hit its %.1fs deadline (%s/%s mirrors returned; "
+                "none produced original posts).",
+                target_username,
+                RSS_FETCH_TIMEOUT,
+                usable_mirrors,
+                len(sources),
+            )
+        elif not merged and not usable_mirrors:
+            logger.warning(
+                "No usable RSS feed for @%s: all %s mirrors failed or returned empty data.",
+                target_username,
+                len(sources),
+            )
+        elif not merged:
+            logger.info(
+                "RSS feeds for @%s were reachable, but no original posts were found; "
+                "reposts are filtered.",
+                target_username,
+            )
+        else:
+            logger.debug(
+                "Collected %s unique original posts from %s completed RSS mirrors for @%s",
+                len(merged),
+                len(feed_results),
+                target_username,
+            )
+
+        return sorted(
+            merged.values(),
+            key=lambda entry: _tweet_id_newest_first_key(extract_id(entry)),
         )
-        return []
     finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in task_sources:
+            if not task.done():
+                task.cancel()
+        if task_sources:
+            await asyncio.gather(*task_sources, return_exceptions=True)
 
 
 # ── Bot Commands ──────────────────────────────────────────────────────────
@@ -1078,7 +1180,20 @@ async def build_content(username, entry):
     if not tid or is_retweet(entry, username):
         return None
     title = extract_tweet_text(entry)
-    translation = await translate_text(title)
+    try:
+        translation = await asyncio.wait_for(
+            translate_text(title),
+            timeout=TRANSLATION_DELIVERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        # Deliver the original post even when a translation provider stalls; a
+        # saved untranslated post can be repaired later by the backfill job.
+        logger.warning(
+            "Translation exceeded %.1fs for @%s; continuing without translation",
+            TRANSLATION_DELIVERY_TIMEOUT,
+            username,
+        )
+        translation = ""
     img_url = extract_image_url(entry)
     link = f"https://x.com/i/status/{tid}"
     return {
@@ -1176,9 +1291,10 @@ async def _download_image(url):
 
 async def deliver(content, chat_ids, bot, force=False):
     if not content:
-        return
+        return False
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View on X", url=content["link"])]])
     saved = False
+    all_delivered = True
 
     has_photo = bool(content.get("img_url"))
     caption = build_message(content, max_len=TELEGRAM_CAPTION_LIMIT)
@@ -1238,10 +1354,13 @@ async def deliver(content, chat_ids, bot, force=False):
         if sent_ok:
             db.mark_sent(cid, content["tid"])
             saved = True
+        else:
+            all_delivered = False
 
     if saved:
         c = content
         db.save_tweet_content(c["username"], c["title"], c["translation"], c["img_url"], c["link"])
+    return all_delivered
 
 
 async def process_user(username, last_id, bot, sem):
@@ -1251,22 +1370,32 @@ async def process_user(username, last_id, bot, sem):
     if not entries:
         return
 
-    all_ids = []
-    for e in entries[:max(10, MAX_TWEETS_PER_CHECK)]:
-        tid = extract_id(e)
-        if tid:
-            all_ids.append((tid, e))
-
+    # Merge may return overlapping items from several mirrors. Deduplicate again here
+    # so callers/tests and the X API path receive the same safe processing behavior.
+    all_ids = {}
+    for entry in entries:
+        tweet_id = extract_id(entry)
+        if tweet_id:
+            all_ids.setdefault(tweet_id, entry)
     if not all_ids:
         return
 
+    ordered = sorted(
+        all_ids.items(),
+        key=lambda item: _tweet_id_newest_first_key(item[0]),
+    )
     if not last_id:
-        db.update_last_id(username, all_ids[0][0])
-        logger.info(f"Baseline @{username}: {all_ids[0][0]}")
+        newest_id = ordered[0][0]
+        db.update_last_id(username, newest_id)
+        logger.info("Baseline @%s: %s", username, newest_id)
         return
 
-    fresh = [(tid, e) for tid, e in all_ids if is_newer_tweet_id(tid, last_id)]
-
+    # Process the oldest unseen entries first. If we cap a backlog, advancing the
+    # cursor to the newest first would permanently skip the older unprocessed posts.
+    fresh = sorted(
+        ((tweet_id, entry) for tweet_id, entry in ordered if is_newer_tweet_id(tweet_id, last_id)),
+        key=lambda item: _tweet_id_sort_key(item[0]),
+    )
     if not fresh:
         return
 
@@ -1274,18 +1403,34 @@ async def process_user(username, last_id, bot, sem):
     if not subs:
         return
 
-    logger.info(f"@{username}: {len(fresh)} new tweets")
-    if len(fresh) > MAX_TWEETS_PER_CHECK:
-        logger.warning("@%s has %s fresh tweets; processing newest %s this cycle", username, len(fresh), MAX_TWEETS_PER_CHECK)
-    selected = sorted(
-        fresh[:MAX_TWEETS_PER_CHECK],
-        key=lambda item: (0, int(item[0])) if str(item[0]).isdigit() else (1, str(item[0])),
-    )
-    for tid, entry in selected:
+    logger.info("@%s: %s new tweets", username, len(fresh))
+    batch_limit = max(1, MAX_TWEETS_PER_CHECK)
+    if len(fresh) > batch_limit:
+        logger.warning(
+            "@%s has %s unseen tweets; processing the oldest %s this cycle and "
+            "leaving the rest for the next check",
+            username,
+            len(fresh),
+            batch_limit,
+        )
+
+    for tweet_id, entry in fresh[:batch_limit]:
         content = await build_content(username, entry)
-        if content:
-            await deliver(content, subs, bot)
-            db.update_last_id(username, tid)
+        if not content:
+            logger.error(
+                "Could not build @%s post %s; keeping the cursor before it for retry",
+                username,
+                tweet_id,
+            )
+            break
+        if not await deliver(content, subs, bot):
+            logger.error(
+                "Could not deliver @%s post %s to every subscriber; keeping it for retry",
+                username,
+                tweet_id,
+            )
+            break
+        db.update_last_id(username, tweet_id)
 
 
 async def check_updates(context):
@@ -1342,7 +1487,21 @@ async def run_cleanup(context):
 @asynccontextmanager
 async def lifespan(fastapi_app):
     global http, bot_app_ref
-    http = httpx.AsyncClient(headers=RSS_HEADERS, timeout=10, follow_redirects=True, limits=httpx.Limits(max_connections=20))
+    http = httpx.AsyncClient(
+        headers=RSS_HEADERS,
+        timeout=10,
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=min(20, HTTP_MAX_CONNECTIONS),
+        ),
+    )
+    logger.info(
+        "HTTP pool max_connections=%s; RSS fetch concurrency=%s; per-account RSS deadline=%.1fs",
+        HTTP_MAX_CONNECTIONS,
+        RSS_FETCH_CONCURRENCY,
+        RSS_FETCH_TIMEOUT,
+    )
 
     from telegram.ext import MessageHandler, filters
 

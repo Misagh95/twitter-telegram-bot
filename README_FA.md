@@ -115,14 +115,19 @@ python twitter_telegram_bot.py
 | `X_API_BASE_URL` | `https://api.x.com/2` | ریشهٔ API نسخهٔ ۲ X |
 | `X_USER_ID_CACHE_TTL` | `86400` | مدت نگهداری شناسهٔ کاربر X در حافظه (ثانیه) |
 | `RSSHUB_BASE_URL` | `https://rsshub.app` | آدرس RSSHub که در حالت بدون X API همراه دیگر منابع RSS امتحان می‌شود |
+| `HTTP_MAX_CONNECTIONS` | `50` | اندازهٔ pool اتصال HTTP؛ برای درخواست‌های RSS ظرفیت اضافه نگه می‌دارد |
+| `RSS_FETCH_TIMEOUT` | `12` | حداکثر زمان بررسی آینه‌های RSS برای هر حساب (ثانیه) |
+| `RSS_MERGE_GRACE` | `0.25` | زمان کوتاه برای ادغام پاسخ آینه‌های سریع پس از اولین فید قابل‌استفاده |
 | `CHECK_INTERVAL` | `300` | فاصله بررسی (ثانیه) |
 | `REQUESTY_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | خالی | کلید سرویس AI برای ترجمه باکیفیت‌تر |
-| `CONCURRENT_LIMIT` | `3` | تعداد درخواست همزمان برای دریافت فید |
+| `CONCURRENT_LIMIT` | `3` | تعداد حساب‌هایی که هم‌زمان بررسی می‌شوند |
+| `RSS_FETCH_CONCURRENCY` | `12` | سقف کلی درخواست‌های هم‌زمان RSS برای جلوگیری از PoolTimeout |
 | `TRANSLATION_TIMEOUT` | `20` | تایم‌اوت هر تلاش ترجمه (ثانیه) |
+| `TRANSLATION_DELIVERY_TIMEOUT` | `15` | حداکثر انتظار برای ترجمه؛ بعدش متن اصلی ارسال می‌شود |
 | `TRANSLATION_RETRIES` | `2` | تعداد تلاش دوباره برای تلاش‌های اصلی AI/Google |
 | `TRANSLATION_CONCURRENT_LIMIT` | `1` | تعداد ترجمه همزمان (برای جلوگیری از محدودیت گوگل کم نگه دار) |
 | `TRANSLATION_BACKFILL_LIMIT` | `15` | تعداد توییت‌های بدون ترجمه که در هر نوبت ترمیم می‌شوند |
-| `MAX_TWEETS_PER_CHECK` | `10` | تعداد توییت جدید پردازش‌شده برای هر اکانت در هر بررسی |
+| `MAX_TWEETS_PER_CHECK` | `10` | تعداد پست‌های ارسال‌شده برای هر حساب در هر نوبت؛ بقیهٔ موارد در نوبت بعد ادامه می‌یابد |
 | `MYMEMORY_SOURCE_LANG` | `en` | زبان مبدأ برای fallback غیرگوگلی ترجمه |
 | `MYMEMORY_EMAIL` | خالی | ایمیل اختیاری برای سقف رایگان بالاتر MyMemory |
 | `LOG_LEVEL` | `INFO` | روی `DEBUG` بگذار تا دلیل نگه‌داشتن یا حذف هر آیتم فید لاگ شود |
